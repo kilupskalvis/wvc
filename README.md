@@ -1,5 +1,5 @@
-<div align="center">
-<pre style="display: inline-block; text-align: left;">
+<table align="center"><tr><td>
+<pre>
 ██╗    ██╗██╗   ██╗ ██████╗
 ██║    ██║██║   ██║██╔════╝
 ██║ █╗ ██║██║   ██║██║
@@ -7,19 +7,18 @@
 ╚███╔███╔╝ ╚████╔╝ ╚██████╗
  ╚══╝╚══╝   ╚═══╝   ╚═════╝
 </pre>
+</td></tr></table>
 
-<strong>Weaviate Version Control</strong>
-<br>
-<em>A git-like CLI tool for version controlling Weaviate databases</em>
-<br><br>
+<p align="center">
+<b>Weaviate Version Control</b><br>
+A git-like CLI tool for version controlling Weaviate databases
+</p>
 
-[![CI](https://github.com/kilupskalvis/wvc/actions/workflows/ci.yml/badge.svg)](https://github.com/kilupskalvis/wvc/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/kilupskalvis/wvc)](https://go.dev/)
-[![Release](https://img.shields.io/github/v/release/kilupskalvis/wvc)](https://github.com/kilupskalvis/wvc/releases)
-[![License](https://img.shields.io/github/license/kilupskalvis/wvc)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/kilupskalvis/wvc)](https://goreportcard.com/report/github.com/kilupskalvis/wvc)
-
-</div>
+<p align="center">
+<a href="https://go.dev/"><img src="https://img.shields.io/github/go-mod/go-version/kilupskalvis/wvc" alt="Go Version"></a>
+<a href="https://github.com/kilupskalvis/wvc/releases"><img src="https://img.shields.io/github/v/release/kilupskalvis/wvc" alt="Release"></a>
+<a href="LICENSE"><img src="https://img.shields.io/github/license/kilupskalvis/wvc" alt="License"></a>
+</p>
 
 ## Installation
 

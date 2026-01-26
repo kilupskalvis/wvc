@@ -56,6 +56,8 @@ brews:
   - repository:
       owner: kilupskalvis
       name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/kilupskalvis/wvc"
     description: "A git-like CLI tool for version controlling Weaviate databases"
     license: "MIT"
