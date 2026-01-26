@@ -1,0 +1,65 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: .
+    binary: wvc
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/kilupskalvis/wvc/internal/cli.Version={{.Version}}
+      - -X github.com/kilupskalvis/wvc/internal/cli.Commit={{.ShortCommit}}
+      - -X github.com/kilupskalvis/wvc/internal/cli.BuildDate={{.Date}}
+
+archives:
+  - formats: ['tar.gz']
+    format_overrides:
+      - goos: windows
+        formats: ['zip']
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: kilupskalvis
+    name: wvc
+  draft: false
+  prerelease: auto
+
+brews:
+  - repository:
+      owner: kilupskalvis
+      name: homebrew-tap
+    homepage: "https://github.com/kilupskalvis/wvc"
+    description: "A git-like CLI tool for version controlling Weaviate databases"
+    license: "MIT"
+    install: |
+      bin.install "wvc"
+    test: |
+      system "#{bin}/wvc", "version"
