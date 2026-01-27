@@ -206,30 +206,3 @@ func (s *Store) DecrementVectorRefCount(hash string) (bool, error) {
 	rows, _ := result.RowsAffected()
 	return rows > 0, nil
 }
-
-// CleanupOrphanedVectors deletes all vectors with ref_count <= 0.
-// Returns the number of deleted vectors.
-func (s *Store) CleanupOrphanedVectors() (int, error) {
-	result, err := s.db.Exec(`DELETE FROM vector_blobs WHERE ref_count <= 0`)
-	if err != nil {
-		return 0, fmt.Errorf("failed to cleanup orphaned vectors: %w", err)
-	}
-
-	rows, _ := result.RowsAffected()
-	return int(rows), nil
-}
-
-// GetVectorBlobStats returns statistics about the vector blob store.
-func (s *Store) GetVectorBlobStats() (totalBlobs int, totalRefs int, totalBytes int64, err error) {
-	err = s.db.QueryRow(`
-		SELECT
-			COUNT(*),
-			COALESCE(SUM(ref_count), 0),
-			COALESCE(SUM(LENGTH(data)), 0)
-		FROM vector_blobs`,
-	).Scan(&totalBlobs, &totalRefs, &totalBytes)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("failed to get vector blob stats: %w", err)
-	}
-	return
-}

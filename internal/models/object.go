@@ -12,18 +12,6 @@ type WeaviateObject struct {
 	LastUpdateTimeUnix int64                  `json:"lastUpdateTimeUnix,omitempty"` // Last modification timestamp (ms)
 }
 
-// ObjectState represents the state of objects at a point in time
-type ObjectState struct {
-	Objects map[string]*WeaviateObject // key: "ClassName/ObjectID"
-}
-
-// NewObjectState creates a new empty ObjectState
-func NewObjectState() *ObjectState {
-	return &ObjectState{
-		Objects: make(map[string]*WeaviateObject),
-	}
-}
-
 // Key returns the unique key for an object
 func ObjectKey(className, objectID string) string {
 	return className + "/" + objectID

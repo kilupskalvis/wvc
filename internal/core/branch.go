@@ -109,21 +109,3 @@ func ResolveRef(st *store.Store, ref string) (commitID string, branchName string
 
 	return commit.ID, "", nil
 }
-
-// EnsureMainBranch creates the main branch if it doesn't exist
-// This is called during init to set up the default branch
-func EnsureMainBranch(st *store.Store, commitID string) error {
-	exists, err := st.BranchExists("main")
-	if err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-
-	if err := st.CreateBranch("main", commitID); err != nil {
-		return err
-	}
-
-	return st.SetCurrentBranch("main")
-}

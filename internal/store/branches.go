@@ -105,20 +105,3 @@ func (s *Store) BranchExists(name string) (bool, error) {
 	).Scan(&count)
 	return count > 0, err
 }
-
-// GetHeadState returns the complete HEAD state
-func (s *Store) GetHeadState() (*models.HeadState, error) {
-	commitID, err := s.GetHEAD()
-	if err != nil {
-		return nil, err
-	}
-	branchName, err := s.GetCurrentBranch()
-	if err != nil {
-		return nil, err
-	}
-	return &models.HeadState{
-		CommitID:   commitID,
-		BranchName: branchName,
-		IsDetached: branchName == "",
-	}, nil
-}

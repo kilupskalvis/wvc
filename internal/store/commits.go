@@ -131,13 +131,6 @@ func (s *Store) GetCommitLog(limit int) ([]*models.Commit, error) {
 	return commits, nil
 }
 
-// GetCommitCount returns the total number of commits
-func (s *Store) GetCommitCount() (int, error) {
-	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM commits").Scan(&count)
-	return count, err
-}
-
 // GetAllAncestors returns all ancestor commit IDs via BFS, handling merge commits
 func (s *Store) GetAllAncestors(commitID string) (map[string]bool, error) {
 	ancestors := make(map[string]bool)

@@ -189,24 +189,6 @@ func (s *Store) SaveKnownObjectWithVector(className, objectID, objectHash, vecto
 	return err
 }
 
-// GetKnownObjectHashes retrieves the object and vector hashes for a known object
-func (s *Store) GetKnownObjectHashes(className, objectID string) (objectHash, vectorHash string, err error) {
-	var objHash *string
-	var vecHash *string
-	err = s.db.QueryRow(`
-		SELECT object_hash, vector_hash FROM known_objects
-		WHERE class_name = ? AND object_id = ?`,
-		className, objectID,
-	).Scan(&objHash, &vecHash)
-	if objHash != nil {
-		objectHash = *objHash
-	}
-	if vecHash != nil {
-		vectorHash = *vecHash
-	}
-	return
-}
-
 // GetAllKnownObjectsWithHashes retrieves all known objects with their hashes
 func (s *Store) GetAllKnownObjectsWithHashes() (map[string]*models.KnownObjectInfo, error) {
 	rows, err := s.db.Query("SELECT class_name, object_id, object_hash, vector_hash, object_data FROM known_objects")

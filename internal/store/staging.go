@@ -121,15 +121,6 @@ func (s *Store) GetStagedChangesCount() (int, error) {
 	return count, err
 }
 
-// IsStagedChange checks if a change is already staged
-func (s *Store) IsStagedChange(className, objectID string) (bool, error) {
-	var count int
-	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM staged_changes WHERE class_name = ? AND object_id = ?
-	`, className, objectID).Scan(&count)
-	return count > 0, err
-}
-
 // scanStagedChanges scans rows into StagedChange structs
 func scanStagedChanges(rows *sql.Rows) ([]*StagedChange, error) {
 	var changes []*StagedChange
