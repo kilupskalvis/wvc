@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // RunMigrations applies any pending database migrations
 func (s *Store) RunMigrations() error {
@@ -30,6 +30,12 @@ func (s *Store) RunMigrations() error {
 	if version < 4 {
 		if err := s.migrateToV4(); err != nil {
 			return fmt.Errorf("migration to v4 failed: %w", err)
+		}
+	}
+
+	if version < 5 {
+		if err := s.migrateToV5(); err != nil {
+			return fmt.Errorf("migration to v5 failed: %w", err)
 		}
 	}
 
@@ -207,6 +213,54 @@ func (s *Store) migrateToV4() error {
 
 	// Record migration version
 	_, err := s.db.Exec("INSERT OR REPLACE INTO wvc_schema_version (version) VALUES (?)", 4)
+	return err
+}
+
+// migrateToV5 adds branches table and HEAD_BRANCH tracking
+func (s *Store) migrateToV5() error {
+	migrations := []string{
+		// Create branches table
+		`CREATE TABLE IF NOT EXISTS branches (
+			name TEXT PRIMARY KEY,
+			commit_id TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (commit_id) REFERENCES commits(id)
+		)`,
+
+		// Create index on commit_id for reverse lookups
+		`CREATE INDEX IF NOT EXISTS idx_branches_commit ON branches(commit_id)`,
+	}
+
+	for _, migration := range migrations {
+		if _, err := s.db.Exec(migration); err != nil {
+			return err
+		}
+	}
+
+	// Create default "main" branch pointing to current HEAD (if any commits exist)
+	head, err := s.GetHEAD()
+	if err != nil {
+		return err
+	}
+
+	// Only create the main branch if we have commits
+	if head != "" {
+		_, err = s.db.Exec(
+			`INSERT OR IGNORE INTO branches (name, commit_id) VALUES ('main', ?)`,
+			head,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Set HEAD_BRANCH to main
+		if err := s.SetValue("HEAD_BRANCH", "main"); err != nil {
+			return err
+		}
+	}
+
+	// Record migration version
+	_, err = s.db.Exec("INSERT OR REPLACE INTO wvc_schema_version (version) VALUES (?)", 5)
 	return err
 }
 

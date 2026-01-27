@@ -112,6 +112,11 @@ func RevertCommitWithWarnings(ctx context.Context, cfg *config.Config, st *store
 		return nil, err
 	}
 
+	// Update branch pointer if on a branch
+	if branch, _ := st.GetCurrentBranch(); branch != "" {
+		_ = st.UpdateBranch(branch, revertCommitID)
+	}
+
 	// Update known state
 	useCursor := cfg.SupportsCursorPagination()
 	if err := UpdateKnownState(ctx, st, client, useCursor); err != nil {

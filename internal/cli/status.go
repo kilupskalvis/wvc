@@ -23,11 +23,21 @@ func runStatus(cmd *cobra.Command, args []string) {
 	defer c.Close()
 
 	st, client := c.Store, c.Client
+
+	// Show branch info
+	currentBranch, _ := st.GetCurrentBranch()
 	head, _ := st.GetHEAD()
+
+	if currentBranch != "" {
+		fmt.Printf("On branch %s\n", currentBranch)
+	} else if head != "" {
+		fmt.Printf("HEAD detached at %s\n", shortID(head))
+	}
+
 	if head != "" {
 		commit, err := st.GetCommit(head)
-		if err == nil {
-			fmt.Printf("On commit %s\n", commit.ShortID())
+		if err == nil && currentBranch != "" {
+			fmt.Printf("Commit: %s\n", commit.ShortID())
 		}
 	} else {
 		fmt.Println("No commits yet")

@@ -121,11 +121,20 @@ func (s *Store) Initialize() error {
 		ref_count INTEGER DEFAULT 1
 	);
 
+	-- Branches (named references to commits)
+	CREATE TABLE IF NOT EXISTS branches (
+		name TEXT PRIMARY KEY,
+		commit_id TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (commit_id) REFERENCES commits(id)
+	);
+
 	-- Indexes
 	CREATE INDEX IF NOT EXISTS idx_vector_blobs_refcount ON vector_blobs(ref_count);
 	CREATE INDEX IF NOT EXISTS idx_operations_commit ON operations(commit_id);
 	CREATE INDEX IF NOT EXISTS idx_operations_object ON operations(class_name, object_id);
 	CREATE INDEX IF NOT EXISTS idx_staged_class ON staged_changes(class_name);
+	CREATE INDEX IF NOT EXISTS idx_branches_commit ON branches(commit_id);
 	`
 
 	_, err := s.db.Exec(schema)
