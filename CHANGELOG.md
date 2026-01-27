@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Schema change tracking
 - Shell completions for bash, zsh, and fish
 - Version command with build information
+- **Branching**: `branch` command to create, list, and delete branches
+- **Checkout**: `checkout` command to switch branches or checkout specific commits
+  - Support for detached HEAD state
+  - `-b` flag to create and switch in one step
+  - `--force` flag to discard uncommitted changes
+- **Merging**: `merge` command with full 3-way merge support
+  - Fast-forward merge when possible
+  - Merge commits with two parents for diverged branches
+  - Conflict detection: modify-modify, delete-modify, add-add
+  - `--ours` flag to auto-resolve conflicts with current branch version
+  - `--theirs` flag to auto-resolve conflicts with incoming branch version
+  - `--no-ff` flag to force merge commit even when fast-forward is possible
+  - `-m` flag for custom merge commit messages
+- Merge parent display in `log` command (shows `Merge: xxx yyy`)
+- `[merge]` and `[schema]` tags in log output for easy identification
 
 ### Changed
 - N/A
