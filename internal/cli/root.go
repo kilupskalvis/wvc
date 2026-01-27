@@ -89,6 +89,8 @@ func init() {
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(revertCmd)
 	rootCmd.AddCommand(showCmd)
+	rootCmd.AddCommand(branchCmd)
+	rootCmd.AddCommand(checkoutCmd)
 }
 
 // exitError prints an error and exits

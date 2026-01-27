@@ -86,6 +86,10 @@ func runInit(cmd *cobra.Command, args []string) {
 		exitError("failed to initialize store: %v", err)
 	}
 
+	// Set up initial branch state (HEAD_BRANCH will be set after first commit)
+	// For now, just ensure we're ready for branching
+	_ = st.SetCurrentBranch("")
+
 	// Take initial snapshot of current state
 	fmt.Printf("Taking initial snapshot...\n")
 	useCursor := cfg.SupportsCursorPagination()

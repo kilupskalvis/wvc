@@ -68,6 +68,15 @@ func CreateCommit(ctx context.Context, cfg *config.Config, st *store.Store, clie
 		return nil, err
 	}
 
+	// Update branch pointer if on a branch
+	if branch, _ := st.GetCurrentBranch(); branch != "" {
+		_ = st.UpdateBranch(branch, commitID)
+	} else if parentID == "" {
+		// First commit - create main branch and set as current
+		_ = st.CreateBranch("main", commitID)
+		_ = st.SetCurrentBranch("main")
+	}
+
 	useCursor := cfg.SupportsCursorPagination()
 	if err := UpdateKnownState(ctx, st, client, useCursor); err != nil {
 		return nil, err
@@ -136,6 +145,15 @@ func CreateCommitFromStaging(ctx context.Context, cfg *config.Config, st *store.
 
 	if err := st.SetHEAD(commitID); err != nil {
 		return nil, err
+	}
+
+	// Update branch pointer if on a branch
+	if branch, _ := st.GetCurrentBranch(); branch != "" {
+		_ = st.UpdateBranch(branch, commitID)
+	} else if parentID == "" {
+		// First commit - create main branch and set as current
+		_ = st.CreateBranch("main", commitID)
+		_ = st.SetCurrentBranch("main")
 	}
 
 	if err := updateKnownStateForStagedChanges(ctx, st, client, stagedChanges); err != nil {
