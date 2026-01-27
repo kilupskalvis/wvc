@@ -43,6 +43,7 @@ func runLog(cmd *cobra.Command, args []string) {
 	yellow := color.New(color.FgYellow)
 
 	magenta := color.New(color.FgMagenta)
+	gray := color.New(color.FgHiBlack)
 
 	for _, commit := range commits {
 		isHead := commit.ID == head
@@ -56,6 +57,9 @@ func runLog(cmd *cobra.Command, args []string) {
 				color.New(color.FgCyan).Print("(HEAD) ")
 			} else {
 				yellow.Printf("%s ", commit.ShortID())
+			}
+			if commit.IsMergeCommit() {
+				gray.Print("[merge] ")
 			}
 			if hasSchemaChange {
 				magenta.Print("[schema] ")
@@ -75,6 +79,9 @@ func runLog(cmd *cobra.Command, args []string) {
 					magenta.Print(" [schema]")
 				}
 				fmt.Println()
+			}
+			if commit.IsMergeCommit() {
+				gray.Printf("Merge:  %s %s\n", shortID(commit.ParentID), shortID(commit.MergeParentID))
 			}
 			fmt.Printf("Date:   %s\n", commit.Timestamp.Format("Mon Jan 2 15:04:05 2006"))
 			fmt.Printf("\n    %s\n", commit.Message)

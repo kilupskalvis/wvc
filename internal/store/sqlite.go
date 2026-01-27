@@ -53,10 +53,12 @@ func (s *Store) Initialize() error {
 	CREATE TABLE IF NOT EXISTS commits (
 		id TEXT PRIMARY KEY,
 		parent_id TEXT,
+		merge_parent_id TEXT,
 		message TEXT NOT NULL,
 		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
 		operation_count INTEGER,
-		FOREIGN KEY (parent_id) REFERENCES commits(id)
+		FOREIGN KEY (parent_id) REFERENCES commits(id),
+		FOREIGN KEY (merge_parent_id) REFERENCES commits(id)
 	);
 
 	-- Schema versions (Weaviate schema tracking)
@@ -135,6 +137,7 @@ func (s *Store) Initialize() error {
 	CREATE INDEX IF NOT EXISTS idx_operations_object ON operations(class_name, object_id);
 	CREATE INDEX IF NOT EXISTS idx_staged_class ON staged_changes(class_name);
 	CREATE INDEX IF NOT EXISTS idx_branches_commit ON branches(commit_id);
+	CREATE INDEX IF NOT EXISTS idx_commits_merge_parent ON commits(merge_parent_id);
 	`
 
 	_, err := s.db.Exec(schema)

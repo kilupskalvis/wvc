@@ -91,6 +91,7 @@ func init() {
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(branchCmd)
 	rootCmd.AddCommand(checkoutCmd)
+	rootCmd.AddCommand(mergeCmd)
 }
 
 // exitError prints an error and exits

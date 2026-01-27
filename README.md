@@ -63,7 +63,20 @@ wvc log                                  # View history
 wvc revert HEAD                          # Undo last commit
 ```
 
+### Branching & Merging
+
+```bash
+wvc branch feature                       # Create a new branch
+wvc checkout feature                     # Switch to branch
+wvc checkout -b hotfix                   # Create and switch in one step
+wvc branch                               # List all branches
+wvc merge feature                        # Merge branch into current
+wvc merge --theirs feature               # Merge, prefer incoming on conflict
+```
+
 ## Commands
+
+### Basic Commands
 
 | Command | Description |
 |---------|-------------|
@@ -77,12 +90,32 @@ wvc revert HEAD                          # Undo last commit
 | `wvc show [<commit>]` | Show commit details |
 | `wvc revert <commit>` | Revert a commit |
 
+### Branching & Merging
+
+| Command | Description |
+|---------|-------------|
+| `wvc branch` | List all branches |
+| `wvc branch <name>` | Create a new branch |
+| `wvc branch -d <name>` | Delete a branch |
+| `wvc checkout <branch>` | Switch to a branch |
+| `wvc checkout <commit>` | Checkout a specific commit (detached HEAD) |
+| `wvc checkout -b <name>` | Create and switch to a new branch |
+| `wvc merge <branch>` | Merge branch into current branch |
+| `wvc merge --no-ff <branch>` | Merge with a merge commit (no fast-forward) |
+| `wvc merge --ours <branch>` | Merge, prefer current branch on conflicts |
+| `wvc merge --theirs <branch>` | Merge, prefer incoming branch on conflicts |
+| `wvc merge -m "<msg>" <branch>` | Merge with a custom commit message |
+
 ## Features
 
 - **Staging area**: Git-like `add`/`reset` workflow for selective commits
 - **Vector tracking**: Detects property-only, vector-only, or combined changes
 - **Exact restoration**: Vectors restored bit-for-bit on revert
 - **Deduplication**: Identical vectors stored once via content-addressable storage
+- **Branching**: Create, switch, and delete branches for parallel development
+- **Merging**: Fast-forward and 3-way merge with conflict detection
+- **Conflict resolution**: Auto-resolve conflicts with `--ours` or `--theirs` flags
+- **Schema tracking**: Track schema changes (new classes, properties) alongside data
 
 ## How It Works
 
@@ -90,10 +123,13 @@ wvc revert HEAD                          # Undo last commit
 2. `wvc status` compares current state against last known state
 3. Changes are recorded as operations (insert, update, delete)
 4. `wvc revert` replays operations in reverse
+5. `wvc branch` creates named references to commits
+6. `wvc checkout` restores the Weaviate state to match a branch or commit
+7. `wvc merge` combines changes from different branches using 3-way merge
 
 Data is stored locally in `.wvc/`:
 - `config` - Weaviate URL and server version
-- `wvc.db` - SQLite database with commits and vector blobs
+- `wvc.db` - SQLite database with commits, branches, and vector blobs
 
 ## Requirements
 

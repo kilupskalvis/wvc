@@ -13,6 +13,40 @@ pre-commit:
         elif [ -x ~/go/bin/staticcheck ]; then
           ~/go/bin/staticcheck ./...
         fi
+    deadcode:
+      run: |
+        DEADCODE=""
+        if command -v deadcode >/dev/null 2>&1; then
+          DEADCODE="deadcode"
+        elif [ -x ~/go/bin/deadcode ]; then
+          DEADCODE="$HOME/go/bin/deadcode"
+        fi
+        if [ -n "$DEADCODE" ]; then
+          # Run deadcode and filter results
+          # - Exclude mock_client.go (test infrastructure)
+          # - For each reported function, check if it's used in test files
+          issues=$($DEADCODE ./... 2>&1 | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            # Skip mock client
+            echo "$line" | grep -q "mock_client.go" && continue
+            # Extract function name (e.g., "Store.GetUncommittedOperations" or "RevertCommit")
+            func_name=$(echo "$line" | sed 's/.*unreachable func: //')
+            # Check if function is used in any test file
+            if [ -n "$func_name" ]; then
+              # For methods like Store.Method, search for .Method
+              search_term=$(echo "$func_name" | sed 's/^[^.]*\./\./')
+              if ! grep -r "$search_term" --include="*_test.go" . >/dev/null 2>&1; then
+                echo "$line"
+              fi
+            fi
+          done)
+          if [ -n "$issues" ]; then
+            echo "$issues"
+            echo ""
+            echo "Deadcode found. Remove unused functions."
+            exit 1
+          fi
+        fi
     test:
       run: go test ./... -short
     mod-tidy:

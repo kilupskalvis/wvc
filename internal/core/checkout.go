@@ -228,7 +228,6 @@ func restoreStateToCommit(ctx context.Context, cfg *config.Config, st *store.Sto
 		if !exists {
 			toCreate[key] = targetObj
 		} else {
-			// Compare hashes
 			targetHash, _ := weaviate.HashObjectFull(targetObj.Object)
 			currentHash, _ := weaviate.HashObjectFull(currentObj)
 			if targetHash != currentHash {
@@ -237,7 +236,6 @@ func restoreStateToCommit(ctx context.Context, cfg *config.Config, st *store.Sto
 		}
 	}
 
-	// Apply deletions first
 	for _, obj := range toDelete {
 		if err := client.DeleteObject(ctx, obj.Class, obj.ID); err != nil {
 			warnings = append(warnings, CheckoutWarning{
@@ -252,7 +250,6 @@ func restoreStateToCommit(ctx context.Context, cfg *config.Config, st *store.Sto
 	// Apply creations
 	for _, objWithVec := range toCreate {
 		obj := objWithVec.Object
-		// Restore vector from blob store if available
 		restoreObjectVector(st, obj, objWithVec.VectorHash)
 		if err := client.CreateObject(ctx, obj); err != nil {
 			warnings = append(warnings, CheckoutWarning{
@@ -281,24 +278,22 @@ func restoreStateToCommit(ctx context.Context, cfg *config.Config, st *store.Sto
 	return warnings, stats, nil
 }
 
-// objectWithVector holds an object and its vector hash for restoration
+// holds an object and its vector hash for restoration
 type objectWithVector struct {
 	Object     *models.WeaviateObject
 	VectorHash string
 }
 
-// reconstructStateAtCommit rebuilds what objects should exist at a commit
+// rebuilds what objects should exist at a commit
 // by walking the operation history from the beginning to the target commit
 func reconstructStateAtCommit(st *store.Store, targetCommitID string) (map[string]*objectWithVector, error) {
 	objects := make(map[string]*objectWithVector)
 
-	// Get all commits from root to target (inclusive)
 	commitPath, err := getCommitPath(st, targetCommitID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Replay operations in order
 	for _, commitID := range commitPath {
 		ops, err := st.GetOperationsByCommit(commitID)
 		if err != nil {
@@ -335,6 +330,7 @@ func reconstructStateAtCommit(st *store.Store, targetCommitID string) (map[strin
 }
 
 // getCommitPath returns commits from root to target in order
+// Note: This only follows the primary parent chain, not merge parents
 func getCommitPath(st *store.Store, targetCommitID string) ([]string, error) {
 	var path []string
 	currentID := targetCommitID
@@ -351,18 +347,16 @@ func getCommitPath(st *store.Store, targetCommitID string) ([]string, error) {
 	return path, nil
 }
 
-// restoreSchemaToCommit restores Weaviate schema to match target commit
+// restores Weaviate schema to match target commit
 func restoreSchemaToCommit(ctx context.Context, st *store.Store, client weaviate.ClientInterface, targetCommitID string) ([]CheckoutWarning, error) {
 	warnings := []CheckoutWarning{}
 
-	// Get target schema
 	targetSchema, err := st.GetSchemaVersionByCommit(targetCommitID)
 	if err != nil {
 		return warnings, err
 	}
 
 	if targetSchema == nil {
-		// No schema at target - this is the initial state
 		return warnings, nil
 	}
 
@@ -371,7 +365,6 @@ func restoreSchemaToCommit(ctx context.Context, st *store.Store, client weaviate
 		return warnings, err
 	}
 
-	// Get current schema
 	currentSchema, err := client.GetSchemaTyped(ctx)
 	if err != nil {
 		return warnings, err
@@ -440,7 +433,7 @@ func restoreSchemaToCommit(ctx context.Context, st *store.Store, client weaviate
 	return warnings, nil
 }
 
-// restoreObjectVector retrieves the exact vector from blob store and sets it on the object
+// retrieves the exact vector from blob store and sets it on the object
 func restoreObjectVector(st *store.Store, obj *models.WeaviateObject, vectorHash string) {
 	if vectorHash == "" {
 		return
@@ -461,24 +454,20 @@ func restoreObjectVector(st *store.Store, obj *models.WeaviateObject, vectorHash
 
 // finishCheckout updates HEAD and branch pointers
 func finishCheckout(st *store.Store, commitID, branchName string, createBranch bool, result *CheckoutResult) (*CheckoutResult, error) {
-	// Create branch if -b was used
 	if createBranch && branchName != "" {
 		if err := st.CreateBranch(branchName, commitID); err != nil {
 			return nil, fmt.Errorf("failed to create branch: %w", err)
 		}
 	}
 
-	// Update HEAD
 	if err := st.SetHEAD(commitID); err != nil {
 		return nil, err
 	}
 
-	// Update current branch
 	if err := st.SetCurrentBranch(branchName); err != nil {
 		return nil, err
 	}
 
-	// Rebuild known_objects to match new state
 	if err := rebuildKnownObjectsFromCommit(st, commitID); err != nil {
 		result.Warnings = append(result.Warnings, CheckoutWarning{
 			Type:    "known_state",
@@ -489,24 +478,20 @@ func finishCheckout(st *store.Store, commitID, branchName string, createBranch b
 	return result, nil
 }
 
-// rebuildKnownObjectsFromCommit rebuilds known_objects table from commit history
+// rebuilds known_objects table from commit history
 func rebuildKnownObjectsFromCommit(st *store.Store, commitID string) error {
-	// Clear existing known objects
 	if err := st.ClearKnownObjects(); err != nil {
 		return err
 	}
 
-	// Reconstruct state
 	objects, err := reconstructStateAtCommit(st, commitID)
 	if err != nil {
 		return err
 	}
 
-	// Save each object to known_objects
 	for _, objWithVec := range objects {
 		obj := objWithVec.Object
 		objectHash, vectorHash := weaviate.HashObjectFull(obj)
-		// Use the stored vector hash if we have it
 		if objWithVec.VectorHash != "" {
 			vectorHash = objWithVec.VectorHash
 		}
