@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	resetTo    string
+	resetTo    string // Hidden, for backwards compatibility
 	resetSoft  bool
 	resetMixed bool
 	resetHard  bool
@@ -21,28 +21,21 @@ var (
 )
 
 var resetCmd = &cobra.Command{
-	Use:   "reset [<class>/<id>]",
+	Use:   "reset [<commit>] [--] [<class>...]",
 	Short: "Unstage changes or reset HEAD to a commit",
 	Long: `Unstage changes from the staging area, or reset HEAD to a specific commit.
 
-Unstage mode (default, without --to):
-  wvc reset                 Unstage all changes
-  wvc reset Article         Unstage all Article class changes
-  wvc reset Article/abc123  Unstage specific object change
+Examples:
+  wvc reset                    Unstage all changes
+  wvc reset Article            Unstage all Article class changes
+  wvc reset HEAD~1             Reset to parent commit (mixed mode)
+  wvc reset --soft HEAD~1      Reset to parent, keep changes staged
+  wvc reset --hard main        Reset to main, restore Weaviate state
+  wvc reset -- main            Force unstage class named "main"
 
-Reset to commit mode (with --to):
-  wvc reset --to <commit>            Reset to commit (mixed mode, default)
-  wvc reset --soft --to <commit>     Soft reset: move HEAD only
-  wvc reset --mixed --to <commit>    Mixed reset: move HEAD + clear staging
-  wvc reset --hard --to <commit>     Hard reset: move HEAD + clear staging + restore Weaviate
-  wvc reset --hard -f --to <commit>  Hard reset without confirmation
-
-Commit references:
-  branch-name    Branch name (e.g., main, feature/foo)
-  abc1234        Short commit ID
-  HEAD           Current commit
-  HEAD~1         Parent of HEAD
-  HEAD~N         N commits back from HEAD
+The command tries to resolve the argument as a commit/branch first.
+If it doesn't resolve, it's treated as a class/object to unstage.
+Use -- to force unstage interpretation.
 
 Reset modes:
   --soft   Move HEAD and branch pointer. Auto-stage changes from undone commits.
@@ -55,32 +48,65 @@ Reset modes:
 }
 
 func init() {
-	resetCmd.Flags().StringVar(&resetTo, "to", "", "Target commit to reset to (branch, commit ID, HEAD, HEAD~N)")
+	// Hidden flag for backwards compatibility
+	resetCmd.Flags().StringVar(&resetTo, "to", "", "Target commit (deprecated, use positional arg)")
+	resetCmd.Flags().MarkHidden("to")
+
 	resetCmd.Flags().BoolVar(&resetSoft, "soft", false, "Soft reset: move HEAD and auto-stage changes from undone commits")
-	resetCmd.Flags().BoolVar(&resetMixed, "mixed", false, "Mixed reset: move HEAD and clear staging (default when --to is used)")
+	resetCmd.Flags().BoolVar(&resetMixed, "mixed", false, "Mixed reset: move HEAD and clear staging (default)")
 	resetCmd.Flags().BoolVar(&resetHard, "hard", false, "Hard reset: move HEAD, clear staging, restore Weaviate state")
 	resetCmd.Flags().BoolVarP(&resetForce, "force", "f", false, "Skip confirmation prompt for hard reset")
 }
 
 func runReset(cmd *cobra.Command, args []string) {
-	// Detect operation type based on --to flag
+	hasModeFlag := resetSoft || resetMixed || resetHard
+
+	// Backwards compat: if --to is used, use old behavior
 	if resetTo != "" {
-		runResetToCommit(cmd, args)
-	} else {
-		// Check if mode flags are used without --to
-		if resetSoft || resetMixed || resetHard {
-			exitError("--soft, --mixed, and --hard require --to flag")
+		runResetToCommit(resetTo)
+		return
+	}
+
+	// If mode flags present, first arg must be commit
+	if hasModeFlag {
+		if len(args) == 0 {
+			exitError("commit reference required with --soft/--mixed/--hard")
 		}
-		runUnstage(cmd, args)
+		runResetToCommit(args[0])
+		return
+	}
+
+	// No mode flags - need to disambiguate
+	if len(args) == 0 {
+		// wvc reset - unstage all
+		runUnstage(args)
+		return
+	}
+
+	// Check if -- was used (forces unstage interpretation)
+	// ArgsLenAtDash returns -1 if -- was not used, otherwise the index
+	dashIdx := cmd.ArgsLenAtDash()
+	if dashIdx == 0 {
+		// wvc reset -- <args> : everything is after --, force unstage
+		runUnstage(args)
+		return
+	}
+
+	// Try to resolve first arg as commit/branch
+	c := initContextWithMigrations()
+	_, _, err := core.ResolveRef(c.Store, args[0])
+	c.Close()
+
+	if err == nil {
+		// Resolves as commit/branch - do mixed reset
+		runResetToCommit(args[0])
+	} else {
+		// Doesn't resolve - treat as class/object for unstage
+		runUnstage(args)
 	}
 }
 
-func runResetToCommit(cmd *cobra.Command, args []string) {
-	// Validate: cannot specify class/object args with --to
-	if len(args) > 0 {
-		exitError("cannot specify class/object when using --to flag")
-	}
-
+func runResetToCommit(target string) {
 	// Validate mutually exclusive flags
 	modeCount := 0
 	if resetSoft {
@@ -125,7 +151,7 @@ func runResetToCommit(cmd *cobra.Command, args []string) {
 		Mode: mode,
 	}
 
-	result, err := core.ResetToCommit(ctx, c.Config, c.Store, c.Client, resetTo, opts)
+	result, err := core.ResetToCommit(ctx, c.Config, c.Store, c.Client, target, opts)
 	if err != nil {
 		exitError("%v", err)
 	}
@@ -174,7 +200,7 @@ func displayResetResult(result *core.ResetResult) {
 	}
 }
 
-func runUnstage(cmd *cobra.Command, args []string) {
+func runUnstage(args []string) {
 	c := initContextWithMigrations()
 	defer c.Close()
 
