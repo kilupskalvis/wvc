@@ -2,6 +2,8 @@ package core
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/kilupskalvis/wvc/internal/models"
 	"github.com/kilupskalvis/wvc/internal/store"
@@ -85,7 +87,14 @@ func DeleteBranch(st *store.Store, name string, force bool) error {
 
 // ResolveRef resolves a ref (branch name or commit ID) to a commit ID
 // Returns (commitID, branchName, error) where branchName is empty if ref is a commit
+// Supports: branch names, full/short commit IDs, HEAD, HEAD~N
 func ResolveRef(st *store.Store, ref string) (commitID string, branchName string, err error) {
+	// Check for HEAD or HEAD~N pattern first
+	if ref == "HEAD" || strings.HasPrefix(ref, "HEAD~") {
+		commitID, err := resolveHEADRef(st, ref)
+		return commitID, "", err
+	}
+
 	// Try as branch first
 	branch, err := st.GetBranch(ref)
 	if err != nil {
@@ -108,4 +117,51 @@ func ResolveRef(st *store.Store, ref string) (commitID string, branchName string
 	}
 
 	return commit.ID, "", nil
+}
+
+// resolveHEADRef resolves HEAD or HEAD~N to a commit ID
+func resolveHEADRef(st *store.Store, ref string) (string, error) {
+	head, err := st.GetHEAD()
+	if err != nil {
+		return "", fmt.Errorf("failed to get HEAD: %w", err)
+	}
+	if head == "" {
+		return "", fmt.Errorf("HEAD not set: no commits yet")
+	}
+
+	// If just "HEAD", return current HEAD
+	if ref == "HEAD" {
+		return head, nil
+	}
+
+	// Parse HEAD~N
+	nStr := strings.TrimPrefix(ref, "HEAD~")
+	n, err := strconv.Atoi(nStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid ref '%s': expected HEAD~N where N is a number", ref)
+	}
+	if n < 0 {
+		return "", fmt.Errorf("invalid ref '%s': N must be non-negative", ref)
+	}
+	if n == 0 {
+		return head, nil
+	}
+
+	// Walk back N commits following primary parent chain
+	commitID := head
+	for i := 0; i < n; i++ {
+		commit, err := st.GetCommit(commitID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get commit %s: %w", commitID, err)
+		}
+		if commit == nil {
+			return "", fmt.Errorf("cannot resolve %s: commit %s not found", ref, commitID)
+		}
+		if commit.ParentID == "" {
+			return "", fmt.Errorf("cannot resolve %s: reached root commit after %d step(s)", ref, i)
+		}
+		commitID = commit.ParentID
+	}
+
+	return commitID, nil
 }
