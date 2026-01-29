@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `-m` flag for custom merge commit messages
 - Merge parent display in `log` command (shows `Merge: xxx yyy`)
 - `[merge]` and `[schema]` tags in log output for easy identification
+- **Reset modes**: `reset` command now supports `--soft`, `--mixed`, and `--hard` modes
+  - `--soft`: Move HEAD and auto-stage changes from undone commits (like `git reset --soft`)
+  - `--mixed`: Move HEAD and clear staging area (default)
+  - `--hard`: Move HEAD, clear staging, and restore Weaviate to target state
+  - Git-like positional argument syntax: `wvc reset --soft HEAD~1`
+  - `-f` flag to skip confirmation for hard reset
+  - Automatic disambiguation between commit references and class names
+  - Use `--` to force class interpretation: `wvc reset -- main`
+- **HEAD~N syntax**: Support for relative commit references (e.g., `HEAD~1`, `HEAD~3`)
 
 ### Changed
 - N/A

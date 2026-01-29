@@ -61,6 +61,8 @@ wvc add .                                # Stage all changes
 wvc commit -m "Initial data load"        # Commit
 wvc log                                  # View history
 wvc revert HEAD                          # Undo last commit
+wvc reset --soft --to HEAD~1             # Undo commit, keep changes staged
+wvc reset --hard --to main               # Discard all and reset to main
 ```
 
 ### Branching & Merging
@@ -84,6 +86,9 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 | `wvc status` | Show uncommitted changes |
 | `wvc add [<class> \| <class>/<id> \| .]` | Stage changes for commit |
 | `wvc reset [<class>/<id>]` | Unstage changes |
+| `wvc reset --soft <commit>` | Soft reset: move HEAD, auto-stage undone changes |
+| `wvc reset <commit>` | Mixed reset: move HEAD, clear staging (default) |
+| `wvc reset --hard <commit>` | Hard reset: move HEAD, restore Weaviate state |
 | `wvc commit -m "<message>" [-a]` | Commit staged changes |
 | `wvc diff [--stat]` | Show detailed changes |
 | `wvc log [--oneline] [-n <count>]` | Show commit history |
@@ -109,6 +114,7 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 ## Features
 
 - **Staging area**: Git-like `add`/`reset` workflow for selective commits
+- **Reset modes**: Soft, mixed, and hard reset with `HEAD~N` syntax support
 - **Vector tracking**: Detects property-only, vector-only, or combined changes
 - **Exact restoration**: Vectors restored bit-for-bit on revert
 - **Deduplication**: Identical vectors stored once via content-addressable storage

@@ -216,3 +216,129 @@ func TestResolveRef_NotFound(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not a valid branch or commit")
 }
+
+func TestResolveRef_HEAD(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Create commit and set HEAD
+	commit := &models.Commit{ID: "abc123def456", Message: "test"}
+	require.NoError(t, st.CreateCommit(commit))
+	require.NoError(t, st.SetHEAD("abc123def456"))
+
+	// Resolve HEAD
+	commitID, branchName, err := ResolveRef(st, "HEAD")
+	require.NoError(t, err)
+	assert.Equal(t, "abc123def456", commitID)
+	assert.Empty(t, branchName)
+}
+
+func TestResolveRef_HEAD_NoCommits(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Try to resolve HEAD without any commits
+	_, _, err := ResolveRef(st, "HEAD")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "HEAD not set")
+}
+
+func TestResolveRef_HEADTilde1(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Create two commits
+	commit1 := &models.Commit{ID: "commit1", Message: "first"}
+	commit2 := &models.Commit{ID: "commit2", ParentID: "commit1", Message: "second"}
+	require.NoError(t, st.CreateCommit(commit1))
+	require.NoError(t, st.CreateCommit(commit2))
+	require.NoError(t, st.SetHEAD("commit2"))
+
+	// Resolve HEAD~1
+	commitID, branchName, err := ResolveRef(st, "HEAD~1")
+	require.NoError(t, err)
+	assert.Equal(t, "commit1", commitID)
+	assert.Empty(t, branchName)
+}
+
+func TestResolveRef_HEADTilde3(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Create four commits
+	commit1 := &models.Commit{ID: "commit1", Message: "first"}
+	commit2 := &models.Commit{ID: "commit2", ParentID: "commit1", Message: "second"}
+	commit3 := &models.Commit{ID: "commit3", ParentID: "commit2", Message: "third"}
+	commit4 := &models.Commit{ID: "commit4", ParentID: "commit3", Message: "fourth"}
+	require.NoError(t, st.CreateCommit(commit1))
+	require.NoError(t, st.CreateCommit(commit2))
+	require.NoError(t, st.CreateCommit(commit3))
+	require.NoError(t, st.CreateCommit(commit4))
+	require.NoError(t, st.SetHEAD("commit4"))
+
+	// Resolve HEAD~3
+	commitID, branchName, err := ResolveRef(st, "HEAD~3")
+	require.NoError(t, err)
+	assert.Equal(t, "commit1", commitID)
+	assert.Empty(t, branchName)
+}
+
+func TestResolveRef_HEADTilde0(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Create commit
+	commit := &models.Commit{ID: "abc123", Message: "test"}
+	require.NoError(t, st.CreateCommit(commit))
+	require.NoError(t, st.SetHEAD("abc123"))
+
+	// Resolve HEAD~0 (same as HEAD)
+	commitID, _, err := ResolveRef(st, "HEAD~0")
+	require.NoError(t, err)
+	assert.Equal(t, "abc123", commitID)
+}
+
+func TestResolveRef_HEADTilde_BeyondRoot(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Create single commit (root)
+	commit := &models.Commit{ID: "root", Message: "root commit"}
+	require.NoError(t, st.CreateCommit(commit))
+	require.NoError(t, st.SetHEAD("root"))
+
+	// Try to resolve HEAD~1 (beyond root)
+	_, _, err := ResolveRef(st, "HEAD~1")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "reached root commit")
+}
+
+func TestResolveRef_HEADTilde_InvalidNumber(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Create commit
+	commit := &models.Commit{ID: "abc123", Message: "test"}
+	require.NoError(t, st.CreateCommit(commit))
+	require.NoError(t, st.SetHEAD("abc123"))
+
+	// Try to resolve HEAD~abc (invalid)
+	_, _, err := ResolveRef(st, "HEAD~abc")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid ref")
+}
+
+func TestResolveRef_HEADTilde_Negative(t *testing.T) {
+	st, cleanup := setupTestStoreForBranches(t)
+	defer cleanup()
+
+	// Create commit
+	commit := &models.Commit{ID: "abc123", Message: "test"}
+	require.NoError(t, st.CreateCommit(commit))
+	require.NoError(t, st.SetHEAD("abc123"))
+
+	// Try to resolve HEAD~-1 (negative)
+	_, _, err := ResolveRef(st, "HEAD~-1")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid ref")
+}
