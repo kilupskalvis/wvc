@@ -131,6 +131,30 @@ func (s *Store) Initialize() error {
 		FOREIGN KEY (commit_id) REFERENCES commits(id)
 	);
 
+	-- Stash entries
+	CREATE TABLE IF NOT EXISTS stashes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		message TEXT NOT NULL,
+		branch_name TEXT NOT NULL DEFAULT '',
+		commit_id TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Stash changes (saved object changes per stash)
+	CREATE TABLE IF NOT EXISTS stash_changes (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		stash_id INTEGER NOT NULL,
+		class_name TEXT NOT NULL,
+		object_id TEXT NOT NULL,
+		change_type TEXT NOT NULL,
+		object_data JSON,
+		previous_data JSON,
+		was_staged BOOLEAN NOT NULL DEFAULT FALSE,
+		vector_hash TEXT,
+		previous_vector_hash TEXT,
+		FOREIGN KEY (stash_id) REFERENCES stashes(id)
+	);
+
 	-- Indexes
 	CREATE INDEX IF NOT EXISTS idx_vector_blobs_refcount ON vector_blobs(ref_count);
 	CREATE INDEX IF NOT EXISTS idx_operations_commit ON operations(commit_id);
@@ -138,6 +162,7 @@ func (s *Store) Initialize() error {
 	CREATE INDEX IF NOT EXISTS idx_staged_class ON staged_changes(class_name);
 	CREATE INDEX IF NOT EXISTS idx_branches_commit ON branches(commit_id);
 	CREATE INDEX IF NOT EXISTS idx_commits_merge_parent ON commits(merge_parent_id);
+	CREATE INDEX IF NOT EXISTS idx_stash_changes_stash ON stash_changes(stash_id);
 	`
 
 	_, err := s.db.Exec(schema)

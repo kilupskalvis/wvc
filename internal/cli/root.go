@@ -92,6 +92,7 @@ func init() {
 	rootCmd.AddCommand(branchCmd)
 	rootCmd.AddCommand(checkoutCmd)
 	rootCmd.AddCommand(mergeCmd)
+	rootCmd.AddCommand(stashCmd)
 }
 
 // exitError prints an error and exits

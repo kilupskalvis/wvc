@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `-m` flag for custom merge commit messages
 - Merge parent display in `log` command (shows `Merge: xxx yyy`)
 - `[merge]` and `[schema]` tags in log output for easy identification
+- **Stashing**: `stash` command to temporarily shelve uncommitted changes
+  - `stash` / `stash push` to save staged and unstaged changes
+  - `-m` flag for custom stash messages (default: `WIP on <branch>: <commit>`)
+  - `stash list` to list all stashes (`stash@{0}` = newest)
+  - `stash pop` to apply and remove a stash
+  - `stash apply` to apply without removing
+  - `--index` flag on `pop`/`apply` to re-stage previously staged changes
+  - `stash drop` to remove a specific stash
+  - `stash show` to display staged vs unstaged changes in a stash
+  - `stash clear` to remove all stashes
+  - `stash@{N}` reference syntax for targeting specific stashes
+  - Database migration to v2 for existing repositories
 - **Reset modes**: `reset` command now supports `--soft`, `--mixed`, and `--hard` modes
   - `--soft`: Move HEAD and auto-stage changes from undone commits (like `git reset --soft`)
   - `--mixed`: Move HEAD and clear staging area (default)

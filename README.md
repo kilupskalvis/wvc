@@ -65,6 +65,20 @@ wvc reset --soft --to HEAD~1             # Undo commit, keep changes staged
 wvc reset --hard --to main               # Discard all and reset to main
 ```
 
+### Stashing
+
+```bash
+wvc stash                                # Save uncommitted changes
+wvc stash -m "work in progress"          # Save with a message
+wvc stash list                           # List all stashes
+wvc stash pop                            # Apply and remove latest stash
+wvc stash pop --index                    # Apply and re-stage previously staged changes
+wvc stash apply stash@{1}               # Apply a specific stash without removing
+wvc stash show                           # Show changes in latest stash
+wvc stash drop stash@{0}                # Remove a specific stash
+wvc stash clear                          # Remove all stashes
+```
+
 ### Branching & Merging
 
 ```bash
@@ -111,6 +125,21 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 | `wvc merge --theirs <branch>` | Merge, prefer incoming branch on conflicts |
 | `wvc merge -m "<msg>" <branch>` | Merge with a custom commit message |
 
+### Stashing
+
+| Command | Description |
+|---------|-------------|
+| `wvc stash` | Save all uncommitted changes |
+| `wvc stash push [-m <message>]` | Save changes with an optional message |
+| `wvc stash list` | List all stashes |
+| `wvc stash pop [stash@{N}]` | Apply and remove a stash |
+| `wvc stash pop --index [stash@{N}]` | Apply, re-stage previously staged changes, and remove |
+| `wvc stash apply [stash@{N}]` | Apply a stash without removing it |
+| `wvc stash apply --index [stash@{N}]` | Apply and re-stage without removing |
+| `wvc stash drop [stash@{N}]` | Remove a specific stash |
+| `wvc stash show [stash@{N}]` | Show changes in a stash |
+| `wvc stash clear` | Remove all stashes |
+
 ## Features
 
 - **Staging area**: Git-like `add`/`reset` workflow for selective commits
@@ -121,6 +150,7 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 - **Branching**: Create, switch, and delete branches for parallel development
 - **Merging**: Fast-forward and 3-way merge with conflict detection
 - **Conflict resolution**: Auto-resolve conflicts with `--ours` or `--theirs` flags
+- **Stashing**: Shelve uncommitted changes and restore them later with `--index` support
 - **Schema tracking**: Track schema changes (new classes, properties) alongside data
 
 ## How It Works
@@ -132,6 +162,7 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 5. `wvc branch` creates named references to commits
 6. `wvc checkout` restores the Weaviate state to match a branch or commit
 7. `wvc merge` combines changes from different branches using 3-way merge
+8. `wvc stash` saves uncommitted changes and restores Weaviate to a clean state
 
 Data is stored locally in `.wvc/`:
 - `config` - Weaviate URL and server version
