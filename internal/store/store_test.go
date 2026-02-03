@@ -1,6 +1,7 @@
 package store
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,32 +10,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestStore creates a new in-memory store for testing
+// newTestStore creates a new bbolt store in a temp directory for testing.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := New(":memory:")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := New(dbPath)
 	require.NoError(t, err)
 	require.NoError(t, st.Initialize())
 	t.Cleanup(func() { st.Close() })
 	return st
 }
 
-// ==================== SQLite Tests ====================
+// ==================== Store Tests ====================
 
 func TestStore_Initialize(t *testing.T) {
-	st, err := New(":memory:")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := New(dbPath)
 	require.NoError(t, err)
 	defer st.Close()
 
 	err = st.Initialize()
 	assert.NoError(t, err)
 
-	// Verify tables exist by running queries
-	var count int
-	err = st.db.QueryRow("SELECT COUNT(*) FROM operations").Scan(&count)
+	// Verify buckets exist by checking we can read from them
+	_, err = st.GetHEAD()
 	assert.NoError(t, err)
 
-	err = st.db.QueryRow("SELECT COUNT(*) FROM commits").Scan(&count)
+	_, err = st.GetUncommittedOperations()
 	assert.NoError(t, err)
 }
 
@@ -228,7 +230,7 @@ func TestStore_DeleteKnownObject(t *testing.T) {
 
 	// Should not be found now
 	_, _, err = st.GetKnownObject("Article", "obj-001")
-	assert.Error(t, err) // sql.ErrNoRows
+	assert.Error(t, err)
 }
 
 func TestStore_ClearKnownObjects(t *testing.T) {
@@ -392,7 +394,7 @@ func TestStore_GetLatestSchemaVersion(t *testing.T) {
 func TestStore_Migrations(t *testing.T) {
 	st := newTestStore(t)
 
-	// Migrations should run without error on fresh DB
+	// Migrations should run without error (no-op for bbolt)
 	err := st.RunMigrations()
 	assert.NoError(t, err)
 

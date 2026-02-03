@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/kilupskalvis/wvc/internal/config"
@@ -12,12 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestStore creates a new in-memory store for testing
+// newTestStore creates a new bbolt store in a temp directory for testing.
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.New(":memory:")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.New(dbPath)
 	require.NoError(t, err)
 	require.NoError(t, st.Initialize())
+	require.NoError(t, st.SetCurrentBranch("main"))
 	t.Cleanup(func() { st.Close() })
 	return st
 }

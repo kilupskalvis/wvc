@@ -81,7 +81,13 @@ func RevertCommitWithWarnings(ctx context.Context, cfg *config.Config, st *store
 	// Create revert commit
 	revertMessage := fmt.Sprintf("Revert: %s", commit.Message)
 	now := time.Now()
-	revertCommitID := generateCommitID(revertMessage, now, commit.ID)
+
+	// Get uncommitted operations (the reverse ops we just recorded) for content-addressable ID
+	uncommittedOps, err := st.GetUncommittedOperations()
+	if err != nil {
+		return nil, err
+	}
+	revertCommitID := generateCommitID(revertMessage, now, commit.ID, uncommittedOps)
 
 	// Capture current schema state for the revert commit
 	if err := captureSchemaSnapshot(ctx, st, client, revertCommitID); err != nil {
@@ -328,10 +334,14 @@ func applyReverseOperations(ctx context.Context, st *store.Store, client weaviat
 		}
 	}
 
-	// Mark original operations as reverted
-	opIDs := make([]int64, len(operations))
-	for i, op := range operations {
-		opIDs[i] = op.ID
+	// Mark original operations as reverted — all ops share the same commit ID
+	if len(operations) > 0 {
+		commitID := operations[0].CommitID
+		seqs := make([]int, len(operations))
+		for i, op := range operations {
+			seqs[i] = op.Seq
+		}
+		return st.MarkOperationsReverted(commitID, seqs)
 	}
-	return st.MarkOperationsReverted(opIDs)
+	return nil
 }

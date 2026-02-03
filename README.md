@@ -90,6 +90,18 @@ wvc merge feature                        # Merge branch into current
 wvc merge --theirs feature               # Merge, prefer incoming on conflict
 ```
 
+### Remote Collaboration
+
+```bash
+wvc remote add origin https://wvc.example.com/myrepo   # Add a remote
+wvc remote set-token origin                              # Set auth token (prompts for input)
+wvc push                                                 # Push current branch to remote
+wvc pull                                                 # Pull and fast-forward from remote
+wvc fetch                                                # Download without modifying local branch
+wvc push --force                                         # Force push (overwrites remote)
+wvc push --delete origin feature                         # Delete a remote branch
+```
+
 ## Commands
 
 ### Basic Commands
@@ -140,6 +152,113 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 | `wvc stash show [stash@{N}]` | Show changes in a stash |
 | `wvc stash clear` | Remove all stashes |
 
+### Remote Collaboration
+
+| Command | Description |
+|---------|-------------|
+| `wvc remote` | List all configured remotes |
+| `wvc remote -v` | List remotes with URLs |
+| `wvc remote add <name> <url>` | Add a remote repository |
+| `wvc remote remove <name>` | Remove a remote |
+| `wvc remote set-url <name> <url>` | Change a remote's URL |
+| `wvc remote set-token <name>` | Set authentication token (reads from stdin) |
+| `wvc remote info <name>` | Show remote repository stats |
+| `wvc push [<remote>] [<branch>]` | Push commits and vectors to a remote |
+| `wvc push --force` | Force push (overwrites remote branch) |
+| `wvc push --delete <remote> <branch>` | Delete a branch on the remote |
+| `wvc pull [<remote>] [<branch>]` | Fetch and fast-forward the local branch |
+| `wvc pull --depth <n>` | Pull only the last n commits |
+| `wvc fetch [<remote>] [<branch>]` | Download commits without modifying local branch |
+| `wvc fetch --depth <n>` | Fetch only the last n commits |
+
+## Team Collaboration Example
+
+This walkthrough shows two team members (Alice and Bob) collaborating on a shared Weaviate database through a `wvc-server`.
+
+### 1. Start the server
+
+```bash
+wvc-server \
+  -data-dir /var/lib/wvc-server \
+  -listen 0.0.0.0:8720 \
+  -admin-token "$ADMIN_TOKEN"
+```
+
+Create a repository directory and an API token:
+
+```bash
+mkdir -p /var/lib/wvc-server/repos/myproject
+
+curl -X POST https://wvc.example.com/admin/tokens \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "team token", "repos": ["myproject"], "permission": "rw"}'
+# returns: {"token": "wvc_abc123..."}
+```
+
+### 2. Alice: initialize and push
+
+Alice connects to the team Weaviate instance, commits the current state, and pushes it to the server:
+
+```bash
+wvc init --url http://weaviate:8080
+wvc commit -m "Initial schema and seed data"
+wvc remote add origin https://wvc.example.com/myproject
+wvc remote set-token origin            # paste the team token when prompted
+wvc push
+```
+
+### 3. Bob: clone via pull
+
+Bob initializes against the same Weaviate instance and pulls Alice's history:
+
+```bash
+wvc init --url http://weaviate:8080
+wvc remote add origin https://wvc.example.com/myproject
+wvc remote set-token origin
+wvc pull
+```
+
+Bob now has all of Alice's commits locally and can browse them with `wvc log`.
+
+### 4. Bob: work on a feature branch
+
+```bash
+wvc checkout -b add-products
+# ... insert Product objects into Weaviate ...
+wvc add Product
+wvc commit -m "Add product catalog"
+wvc push origin add-products
+```
+
+### 5. Alice: review and merge
+
+Alice fetches Bob's branch, inspects it, and merges it into main:
+
+```bash
+wvc fetch origin add-products
+wvc log origin/add-products            # review Bob's commits
+wvc merge origin/add-products          # merge into current branch
+wvc push
+```
+
+### 6. Handling divergence
+
+If Alice and Bob both push to `main`, the second push is rejected:
+
+```
+$ wvc push
+error: push rejected: remote has diverged; pull first or use --force
+```
+
+Pull to detect the divergence, merge, and push again:
+
+```bash
+wvc pull                               # fetches and reports divergence
+wvc merge origin/main                  # integrate remote changes
+wvc push                               # push the merged result
+```
+
 ## Features
 
 - **Staging area**: Git-like `add`/`reset` workflow for selective commits
@@ -152,6 +271,10 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 - **Conflict resolution**: Auto-resolve conflicts with `--ours` or `--theirs` flags
 - **Stashing**: Shelve uncommitted changes and restore them later with `--index` support
 - **Schema tracking**: Track schema changes (new classes, properties) alongside data
+- **Remote collaboration**: Push/pull/fetch with a central `wvc-server` for team workflows
+- **Token authentication**: Scoped read-only or read-write tokens per repository
+- **Shallow fetch**: Download only recent history with `--depth`
+- **Force push**: Overwrite remote history when needed
 
 ## How It Works
 
@@ -163,10 +286,53 @@ wvc merge --theirs feature               # Merge, prefer incoming on conflict
 6. `wvc checkout` restores the Weaviate state to match a branch or commit
 7. `wvc merge` combines changes from different branches using 3-way merge
 8. `wvc stash` saves uncommitted changes and restores Weaviate to a clean state
+9. `wvc push` uploads commits and vectors to a remote `wvc-server`
+10. `wvc pull` downloads remote commits and fast-forwards the local branch
+11. `wvc fetch` downloads remote commits without modifying the local branch
 
 Data is stored locally in `.wvc/`:
 - `config` - Weaviate URL and server version
-- `wvc.db` - SQLite database with commits, branches, and vector blobs
+- `wvc.db` - Commits, branches, operations, and vector blobs
+
+## wvc-server
+
+The remote server stores repositories and handles push/pull negotiation. Each repository is isolated with its own metadata database and blob storage.
+
+```bash
+wvc-server \
+  -data-dir /var/lib/wvc-server \
+  -listen 0.0.0.0:8720 \
+  -admin-token "$ADMIN_TOKEN"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-data-dir` | `/var/lib/wvc-server` | Root directory for repository data |
+| `-listen` | `0.0.0.0:8720` | Address and port to listen on |
+| `-admin-token` | | Token for admin API (create tokens, run GC) |
+| `-tls-cert` | | TLS certificate file |
+| `-tls-key` | | TLS private key file |
+| `-webhook-urls` | | Comma-separated URLs to notify on push |
+| `-log-level` | `info` | Log level: debug, info, warn, error |
+| `-log-format` | `json` | Log format: json, text |
+
+### Admin API
+
+Create a scoped token:
+
+```bash
+curl -X POST https://wvc.example.com/admin/tokens \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "ci-readonly", "repos": ["myproject"], "permission": "ro"}'
+```
+
+Run garbage collection on a repository:
+
+```bash
+curl -X POST https://wvc.example.com/admin/repos/myproject/gc \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
 
 ## Requirements
 

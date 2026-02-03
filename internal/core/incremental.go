@@ -148,13 +148,9 @@ func processClassFullScan(ctx context.Context, st *store.Store, client weaviate.
 
 	// Build map of current objects
 	currentMap := make(map[string]*models.WeaviateObject)
-	var maxTimestamp int64
 	for _, obj := range currentObjects {
 		key := models.ObjectKey(className, obj.ID)
 		currentMap[key] = obj
-		if obj.LastUpdateTimeUnix > maxTimestamp {
-			maxTimestamp = obj.LastUpdateTimeUnix
-		}
 	}
 
 	// Find inserts and updates (only add to Unstaged - staged changes come from DB)
@@ -238,14 +234,8 @@ func processClassIncrementalScan(ctx context.Context, st *store.Store, client we
 		return err
 	}
 
-	var maxTimestamp int64 = watermark
-
 	// Only process objects with timestamps > watermark (and not already staged)
 	for _, obj := range currentObjects {
-		if obj.LastUpdateTimeUnix > maxTimestamp {
-			maxTimestamp = obj.LastUpdateTimeUnix
-		}
-
 		// Skip if not modified since last scan
 		if obj.LastUpdateTimeUnix <= watermark {
 			continue
@@ -325,21 +315,25 @@ func processDeletedClass(st *store.Store, className string, result *IncrementalD
 	return nil
 }
 
-// getKnownClasses returns all classes that have known objects
+// getKnownClasses returns all classes that have known objects.
+// It scans the known_objects bucket and extracts distinct class names from keys
+// formatted as "class:objectID".
 func getKnownClasses(st *store.Store) ([]string, error) {
-	rows, err := st.DB().Query("SELECT DISTINCT class_name FROM known_objects")
+	knownObjects, err := st.GetAllKnownObjectsWithHashes()
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var classes []string
-	for rows.Next() {
-		var class string
-		if err := rows.Scan(&class); err != nil {
-			return nil, err
+	classSet := make(map[string]bool)
+	for _, info := range knownObjects {
+		if info.Object != nil && info.Object.Class != "" {
+			classSet[info.Object.Class] = true
 		}
-		classes = append(classes, class)
+	}
+
+	classes := make([]string, 0, len(classSet))
+	for c := range classSet {
+		classes = append(classes, c)
 	}
 	return classes, nil
 }

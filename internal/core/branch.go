@@ -85,17 +85,17 @@ func DeleteBranch(st *store.Store, name string, force bool) error {
 	return st.DeleteBranch(name)
 }
 
-// ResolveRef resolves a ref (branch name or commit ID) to a commit ID
-// Returns (commitID, branchName, error) where branchName is empty if ref is a commit
-// Supports: branch names, full/short commit IDs, HEAD, HEAD~N
+// ResolveRef resolves a ref to a commit ID.
+// Returns (commitID, branchName, error) where branchName is empty if ref is not a local branch.
+// Resolution order: HEAD/HEAD~N, local branch, remote-tracking ref, full commit ID, short commit ID.
 func ResolveRef(st *store.Store, ref string) (commitID string, branchName string, err error) {
-	// Check for HEAD or HEAD~N pattern first
+	// 1. HEAD or HEAD~N
 	if ref == "HEAD" || strings.HasPrefix(ref, "HEAD~") {
 		commitID, err := resolveHEADRef(st, ref)
 		return commitID, "", err
 	}
 
-	// Try as branch first
+	// 2. Local branch
 	branch, err := st.GetBranch(ref)
 	if err != nil {
 		return "", "", err
@@ -104,13 +104,23 @@ func ResolveRef(st *store.Store, ref string) (commitID string, branchName string
 		return branch.CommitID, branch.Name, nil
 	}
 
-	// Try as full commit ID
+	// 3. Remote-tracking ref (e.g., "origin/main")
+	if i := strings.IndexByte(ref, '/'); i > 0 {
+		remoteName := ref[:i]
+		remoteBranch := ref[i+1:]
+		rb, err := st.GetRemoteBranch(remoteName, remoteBranch)
+		if err == nil && rb != nil {
+			return rb.CommitID, "", nil
+		}
+	}
+
+	// 4. Full commit ID
 	commit, err := st.GetCommit(ref)
 	if err == nil && commit != nil {
 		return commit.ID, "", nil
 	}
 
-	// Try as short commit ID
+	// 5. Short commit ID
 	commit, err = st.GetCommitByShortID(ref)
 	if err != nil {
 		return "", "", fmt.Errorf("'%s' is not a valid branch or commit", ref)

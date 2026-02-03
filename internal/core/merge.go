@@ -486,10 +486,14 @@ func applyMergedState(ctx context.Context, st *store.Store, client weaviate.Clie
 func createMergeCommit(ctx context.Context, cfg *config.Config, st *store.Store, client weaviate.ClientInterface, parent1, parent2, message string, stats *StateRestoreStats) (*models.Commit, error) {
 	now := time.Now()
 
-	// Generate commit ID
-	data := fmt.Sprintf("%s|%s|%s|%s", message, now.Format(time.RFC3339Nano), parent1, parent2)
-	hash := sha256.Sum256([]byte(data))
-	commitID := hex.EncodeToString(hash[:])
+	// Get uncommitted operations for content-addressable commit ID
+	uncommittedOps, err := st.GetUncommittedOperations()
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate commit ID — for merges, include both parents in the hash
+	commitID := generateMergeCommitID(message, now, parent1, parent2, uncommittedOps)
 
 	// Capture schema snapshot
 	if err := captureSchemaSnapshot(ctx, st, client, commitID); err != nil {
@@ -536,6 +540,15 @@ func hashObjWithVec(obj *objectWithVector) string {
 	}
 	hash, _ := weaviate.HashObjectFull(obj.Object)
 	return hash
+}
+
+// generateMergeCommitID generates a content-addressable commit ID for merge commits.
+// Includes both parent IDs and the operations Merkle hash.
+func generateMergeCommitID(message string, timestamp time.Time, parent1, parent2 string, operations []*models.Operation) string {
+	opsHash := computeOperationsHash(operations)
+	data := fmt.Sprintf("%s|%s|%s|%s|%s", message, timestamp.Format(time.RFC3339Nano), parent1, parent2, opsHash)
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
 }
 
 // warningsToStrings converts CheckoutWarnings to strings

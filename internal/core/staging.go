@@ -120,14 +120,11 @@ func UnstageObject(st *store.Store, className, objectID string) error {
 // ParseObjectRef parses a reference like "Article/abc123" into class and ID
 func ParseObjectRef(ref string) (className, objectID string, err error) {
 	parts := strings.SplitN(ref, "/", 2)
-	if len(parts) == 1 {
-		// Just a class name
-		return parts[0], "", nil
-	}
 	if len(parts) == 2 {
 		return parts[0], parts[1], nil
 	}
-	return "", "", fmt.Errorf("invalid reference format: %s", ref)
+	// Just a class name
+	return parts[0], "", nil
 }
 
 // GetStagedDiff returns only the staged changes as a DiffResult

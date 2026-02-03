@@ -61,7 +61,7 @@ func runShow(cmd *cobra.Command, args []string) {
 	fmt.Println()
 
 	if commit.ParentID != "" {
-		fmt.Printf("Parent: %s\n", commit.ParentID[:7])
+		fmt.Printf("Parent: %s\n", shortID(commit.ParentID))
 	}
 	fmt.Printf("Date:   %s\n", commit.Timestamp.Format("Mon Jan 2 15:04:05 2006"))
 	fmt.Printf("\n    %s\n\n", commit.Message)

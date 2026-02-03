@@ -1,5 +1,7 @@
 # Binaries
 wvc
+wvc-server
+e2e-test
 bin/
 *.exe
 *.exe~
@@ -28,3 +30,6 @@ Thumbs.db
 
 # Local config/data
 .wvc/
+
+# SQLite in-memory artifacts
+:memory:

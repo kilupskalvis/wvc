@@ -1,8 +1,11 @@
 package store
 
 import (
-	"database/sql"
+	"bytes"
+	"encoding/json"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 // ScanMetadata represents the scan state for a class
@@ -13,32 +16,54 @@ type ScanMetadata struct {
 	ScanHighWatermark int64 // Highest lastUpdateTimeUnix seen
 }
 
-// GetScanMetadata retrieves scan metadata for a class
+// GetScanMetadata retrieves scan metadata for a class, returns nil if not found
 func (s *Store) GetScanMetadata(className string) (*ScanMetadata, error) {
-	var meta ScanMetadata
-	var lastScanTime int64
+	var metadata *ScanMetadata
 
-	err := s.db.QueryRow(`
-		SELECT class_name, last_scan_time, last_scan_count, scan_high_watermark
-		FROM scan_metadata WHERE class_name = ?
-	`, className).Scan(&meta.ClassName, &lastScanTime, &meta.LastScanCount, &meta.ScanHighWatermark)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketScanMetadata)
+		if bucket == nil {
+			return nil
+		}
 
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+		data := bucket.Get([]byte(className))
+		if data == nil {
+			return nil
+		}
+
+		metadata = &ScanMetadata{}
+		return json.Unmarshal(data, metadata)
+	})
+
 	if err != nil {
 		return nil, err
 	}
 
-	meta.LastScanTime = time.Unix(lastScanTime, 0)
-	return &meta, nil
+	return metadata, nil
 }
 
-// GetKnownObjectCount returns the count of known objects for a class
+// GetKnownObjectCount counts known objects with matching class prefix
 func (s *Store) GetKnownObjectCount(className string) (int, error) {
-	var count int
-	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM known_objects WHERE class_name = ?
-	`, className).Scan(&count)
-	return count, err
+	count := 0
+	prefix := []byte(className + ":")
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketKnownObjects)
+		if bucket == nil {
+			return nil
+		}
+
+		cursor := bucket.Cursor()
+		for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+			count++
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
 }
