@@ -43,7 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `stash show` to display staged vs unstaged changes in a stash
   - `stash clear` to remove all stashes
   - `stash@{N}` reference syntax for targeting specific stashes
-  - Database migration to v2 for existing repositories
 - **Reset modes**: `reset` command now supports `--soft`, `--mixed`, and `--hard` modes
   - `--soft`: Move HEAD and auto-stage changes from undone commits (like `git reset --soft`)
   - `--mixed`: Move HEAD and clear staging area (default)
@@ -53,9 +52,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Automatic disambiguation between commit references and class names
   - Use `--` to force class interpretation: `wvc reset -- main`
 - **HEAD~N syntax**: Support for relative commit references (e.g., `HEAD~1`, `HEAD~3`)
+- **Content-addressable commit IDs**: commit IDs are now SHA256 hashes derived from
+  message, timestamp, parent ID, and a Merkle hash of all operations — guaranteeing
+  deterministic, collision-free IDs across client and server
+- **Remote management**: `remote` command to manage remote server connections
+  - `remote add <name> <url>` to register a remote
+  - `remote remove <name>` to deregister a remote
+  - `remote list` to show all configured remotes
+  - `remote set-token <name>` to store a bearer token (prompted, not echoed)
+  - `remote info <name>` to show branch and commit counts from the server
+  - Token resolution order: `WVC_REMOTE_TOKEN_<NAME>` env var → `WVC_REMOTE_TOKEN` env var → stored token
+- **Push**: `push [remote] [branch]` to upload commits and vectors to a remote server
+  - Negotiation phase to determine which commits and vectors are missing on the remote
+  - Parallel vector upload with 4 concurrent workers
+  - Commits uploaded in topological order (oldest first)
+  - Compare-and-swap branch update — rejects push if remote has diverged (fetch first)
+  - `--force` flag to bypass divergence check
+  - `--delete <branch>` flag to delete a remote branch
+- **Pull**: `pull [remote] [branch]` to fetch and integrate remote changes
+  - Fast-forwards local branch when possible
+  - Reports divergence and suggests `wvc merge` when branches have split
+  - `--depth <n>` flag for shallow pull (last N commits only)
+- **Fetch**: `fetch [remote] [branch]` to download remote changes without modifying the local branch
+  - Updates remote-tracking branches (e.g., `origin/main`)
+  - `--depth <n>` flag for shallow fetch
+- **Shallow clones**: limit history depth on pull/fetch with `--depth N`
+  - Reconstructs full Weaviate state from the shallow boundary forward
+- **`wvc-server` binary**: central remote server for team collaboration
+  - Stores commit metadata in bbolt, vector blobs on the local filesystem
+  - Bearer token authentication with per-repository permission scoping
+  - Admin API for token provisioning (`/admin/tokens`) and garbage collection (`/admin/repos/{name}/gc`)
+  - Rate limiting: configurable sliding window per token (default 300 req/min)
+  - Per-repository write lock to prevent concurrent push and GC races
+  - TLS support via `-tls-cert` / `-tls-key` flags
+  - Webhook notifications on successful push with HMAC-SHA256 request signing
+  - Structured JSON logging with request ID propagation
+  - Gzip compression for commit bundle transfers
+  - Graceful shutdown on SIGINT/SIGTERM
 
 ### Changed
-- N/A
+- Replaced SQLite with [bbolt](https://github.com/etcd-io/bbolt) for local storage —
+  pure Go, no CGO required, consistent with the server-side metastore
+- Operation identity now uses stable `(commit_id, seq)` pairs instead of
+  auto-increment integers, enabling reliable transfer between client and server
 
 ### Fixed
 - N/A
