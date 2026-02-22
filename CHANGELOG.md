@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-02-22
 
 ### Added
 - Initial release
@@ -78,17 +78,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--depth <n>` flag for shallow fetch
 - **Shallow clones**: limit history depth on pull/fetch with `--depth N`
   - Reconstructs full Weaviate state from the shallow boundary forward
-- **`wvc-server` binary**: central remote server for team collaboration
+- **`wvc server` subcommand**: central remote server for team collaboration, built into the `wvc` binary (no separate installation)
+  - `wvc server start` to run the server; admin token set via `WVC_ADMIN_TOKEN` env var
+  - `wvc server repos create/list/delete` to manage repositories via the CLI
+  - `wvc server tokens create/list/delete` to manage scoped access tokens via the CLI
   - Stores commit metadata in bbolt, vector blobs on the local filesystem
   - Bearer token authentication with per-repository permission scoping
   - Admin API for token provisioning (`/admin/tokens`) and garbage collection (`/admin/repos/{name}/gc`)
   - Rate limiting: configurable sliding window per token (default 300 req/min)
   - Per-repository write lock to prevent concurrent push and GC races
-  - TLS support via `-tls-cert` / `-tls-key` flags
+  - TLS support via `--tls-cert` / `--tls-key` flags
   - Webhook notifications on successful push with HMAC-SHA256 request signing
   - Structured JSON logging with request ID propagation
   - Gzip compression for commit bundle transfers
   - Graceful shutdown on SIGINT/SIGTERM
+  - Default data directory: `~/.wvc-server` (override with `--data-dir` or `WVC_DATA_DIR`)
+- **`wvc pull` Weaviate restore**: after a successful fast-forward, the local Weaviate instance is now updated to match the new HEAD (previously only the local commit history was updated)
 
 ### Changed
 - Replaced SQLite with [bbolt](https://github.com/etcd-io/bbolt) for local storage —
