@@ -173,27 +173,28 @@ wvc push --delete origin feature                         # Delete a remote branc
 
 ## Team Collaboration Example
 
-This walkthrough shows two team members (Alice and Bob) collaborating on a shared Weaviate database through a `wvc-server`.
+This walkthrough shows two team members (Alice and Bob) collaborating on a shared Weaviate database through a `wvc` remote server.
 
 ### 1. Start the server
 
 ```bash
-wvc-server \
-  -data-dir /var/lib/wvc-server \
-  -listen 0.0.0.0:8720 \
-  -admin-token "$ADMIN_TOKEN"
+WVC_ADMIN_TOKEN="$ADMIN_TOKEN" wvc server start \
+  --data-dir /var/lib/wvc-server \
+  --listen 0.0.0.0:8720 \
+  --tls-cert server.crt \
+  --tls-key server.key
 ```
 
-Create a repository directory and an API token:
+Create a repository and an API token using the CLI:
 
 ```bash
-mkdir -p /var/lib/wvc-server/repos/myproject
+wvc server repos create myproject \
+  --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
 
-curl -X POST https://wvc.example.com/admin/tokens \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"description": "team token", "repos": ["myproject"], "permission": "rw"}'
-# returns: {"token": "wvc_abc123..."}
+wvc server tokens create \
+  --desc "team token" --repo myproject --permission rw \
+  --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
+# → Token: wvc_abc123...  Save this token — it will not be shown again.
 ```
 
 ### 2. Alice: initialize and push
@@ -271,8 +272,8 @@ wvc push                               # push the merged result
 - **Conflict resolution**: Auto-resolve conflicts with `--ours` or `--theirs` flags
 - **Stashing**: Shelve uncommitted changes and restore them later with `--index` support
 - **Schema tracking**: Track schema changes (new classes, properties) alongside data
-- **Remote collaboration**: Push/pull/fetch with a central `wvc-server` for team workflows
-- **Token authentication**: Scoped read-only or read-write tokens per repository
+- **Remote collaboration**: Push/pull/fetch with a central `wvc server` for team workflows
+- **Token authentication**: Scoped read-only or read-write tokens per repository, managed via `wvc server tokens`
 - **Shallow fetch**: Download only recent history with `--depth`
 - **Force push**: Overwrite remote history when needed
 
@@ -286,46 +287,57 @@ wvc push                               # push the merged result
 6. `wvc checkout` restores the Weaviate state to match a branch or commit
 7. `wvc merge` combines changes from different branches using 3-way merge
 8. `wvc stash` saves uncommitted changes and restores Weaviate to a clean state
-9. `wvc push` uploads commits and vectors to a remote `wvc-server`
-10. `wvc pull` downloads remote commits and fast-forwards the local branch
+9. `wvc push` uploads commits and vectors to a remote `wvc server`
+10. `wvc pull` downloads remote commits, fast-forwards the local branch, and restores Weaviate state
 11. `wvc fetch` downloads remote commits without modifying the local branch
 
 Data is stored locally in `.wvc/`:
 - `config` - Weaviate URL and server version
 - `wvc.db` - Commits, branches, operations, and vector blobs
 
-## wvc-server
+## Server
 
-The remote server stores repositories and handles push/pull negotiation. Each repository is isolated with its own metadata database and blob storage.
+The remote server stores repositories and handles push/pull negotiation. Each repository is isolated with its own metadata database and blob storage. The server is built into the `wvc` binary — no separate installation needed.
 
 ```bash
-wvc-server \
-  -data-dir /var/lib/wvc-server \
-  -listen 0.0.0.0:8720 \
-  -admin-token "$ADMIN_TOKEN"
+WVC_ADMIN_TOKEN="$ADMIN_TOKEN" wvc server start \
+  --data-dir /var/lib/wvc-server \
+  --listen 0.0.0.0:8720 \
+  --tls-cert server.crt \
+  --tls-key server.key
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-data-dir` | `/var/lib/wvc-server` | Root directory for repository data |
-| `-listen` | `0.0.0.0:8720` | Address and port to listen on |
-| `-admin-token` | | Token for admin API (create tokens, run GC) |
-| `-tls-cert` | | TLS certificate file |
-| `-tls-key` | | TLS private key file |
-| `-webhook-urls` | | Comma-separated URLs to notify on push |
-| `-log-level` | `info` | Log level: debug, info, warn, error |
-| `-log-format` | `json` | Log format: json, text |
+| `--data-dir` | `~/.wvc-server` | Root directory for repository data |
+| `--listen` | `127.0.0.1:8720` | Address and port to listen on |
+| `--tls-cert` | | TLS certificate file |
+| `--tls-key` | | TLS private key file |
+| `--webhook-urls` | | Comma-separated URLs to notify on push |
+| `--webhook-secret` | | HMAC secret for signing webhook payloads |
+| `--log-level` | `info` | Log level: debug, info, warn, error |
+| `--log-format` | `json` | Log format: json, text |
 
-### Admin API
+The admin token is set via the `WVC_ADMIN_TOKEN` environment variable and enables the `/admin/` endpoints.
 
-Create a scoped token:
+### Admin Commands
+
+Manage repositories and tokens from anywhere with network access:
 
 ```bash
-curl -X POST https://wvc.example.com/admin/tokens \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"description": "ci-readonly", "repos": ["myproject"], "permission": "ro"}'
+# Repositories
+wvc server repos create myproject --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
+wvc server repos list             --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
+wvc server repos delete myproject --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
+
+# Tokens
+wvc server tokens create --desc "ci-readonly" --repo myproject --permission ro \
+  --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
+wvc server tokens list   --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
+wvc server tokens delete <token-id> --url https://wvc.example.com --admin-token "$ADMIN_TOKEN"
 ```
+
+The `--url` and `--admin-token` flags can be set via environment variables `WVC_SERVER_URL` and `WVC_ADMIN_TOKEN`.
 
 Run garbage collection on a repository:
 

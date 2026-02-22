@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/kilupskalvis/wvc/internal/config"
 	"github.com/kilupskalvis/wvc/internal/remote"
 	"github.com/kilupskalvis/wvc/internal/store"
+	"github.com/kilupskalvis/wvc/internal/weaviate"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -37,8 +39,12 @@ type PullOptions struct {
 // PullResult contains the outcome of a pull operation.
 type PullResult struct {
 	FetchResult
-	FastForward bool
-	Diverged    bool
+	FastForward    bool
+	Diverged       bool
+	ObjectsAdded   int
+	ObjectsUpdated int
+	ObjectsRemoved int
+	Warnings       []CheckoutWarning
 }
 
 // FetchProgress is called during fetch to report progress.
@@ -162,7 +168,8 @@ func Fetch(ctx context.Context, st *store.Store, client remote.RemoteClient, opt
 
 // Pull fetches from a remote and attempts to fast-forward the local branch.
 // If the branches have diverged, it reports divergence without merging.
-func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts PullOptions, progress FetchProgress) (*PullResult, error) {
+// On a successful fast-forward, Weaviate is restored to the new tip's state.
+func Pull(ctx context.Context, cfg *config.Config, st *store.Store, wc weaviate.ClientInterface, client remote.RemoteClient, opts PullOptions, progress FetchProgress) (*PullResult, error) {
 	// Check for uncommitted changes
 	uncommitted, err := st.GetUncommittedOperations()
 	if err != nil {
@@ -198,6 +205,9 @@ func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 			return nil, fmt.Errorf("create local branch: %w", err)
 		}
 		result.FastForward = true
+		if err := applyPullRestore(ctx, cfg, st, wc, fetchResult.RemoteTip, result); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
@@ -216,6 +226,9 @@ func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 			}
 		}
 		result.FastForward = true
+		if err := applyPullRestore(ctx, cfg, st, wc, fetchResult.RemoteTip, result); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
@@ -243,8 +256,10 @@ func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 				return nil, fmt.Errorf("update local branch: %w", err)
 			}
 		}
-
 		result.FastForward = true
+		if err := applyPullRestore(ctx, cfg, st, wc, fetchResult.RemoteTip, result); err != nil {
+			return nil, err
+		}
 		return result, nil
 	}
 
@@ -263,6 +278,27 @@ func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 	// Branches have diverged
 	result.Diverged = true
 	return result, nil
+}
+
+// applyPullRestore restores the Weaviate instance to the given commit's state and
+// rebuilds the known-objects table, mirroring what Checkout does after switching branches.
+func applyPullRestore(ctx context.Context, cfg *config.Config, st *store.Store, wc weaviate.ClientInterface, commitID string, result *PullResult) error {
+	warnings, stats, err := restoreStateToCommit(ctx, cfg, st, wc, commitID)
+	if err != nil {
+		return fmt.Errorf("restore state after pull: %w", err)
+	}
+	result.Warnings = warnings
+	result.ObjectsAdded = stats.Added
+	result.ObjectsUpdated = stats.Updated
+	result.ObjectsRemoved = stats.Removed
+
+	if err := rebuildKnownObjectsFromCommit(st, commitID); err != nil {
+		result.Warnings = append(result.Warnings, CheckoutWarning{
+			Type:    "known_state",
+			Message: fmt.Sprintf("failed to rebuild known state: %v", err),
+		})
+	}
+	return nil
 }
 
 // filterMissingLocalVectors returns hashes of vectors not present in the local store.
