@@ -100,6 +100,7 @@ func init() {
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(fetchCmd)
+	rootCmd.AddCommand(serverCmd)
 }
 
 // exitError prints an error and exits

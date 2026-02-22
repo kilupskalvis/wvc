@@ -34,7 +34,7 @@ func init() {
 }
 
 func runPull(cmd *cobra.Command, args []string) {
-	c := initContextWithMigrations()
+	c := initFullContext()
 	defer c.Close()
 
 	ctx := context.Background()
@@ -55,7 +55,7 @@ func runPull(cmd *cobra.Command, args []string) {
 
 	fmt.Printf("Pulling from %s (%s)...\n", remoteName, remoteInfo.URL)
 
-	result, err := core.Pull(ctx, c.Store, client, core.PullOptions{
+	result, err := core.Pull(ctx, c.Config, c.Store, c.Client, client, core.PullOptions{
 		RemoteName: remoteName,
 		Branch:     branch,
 		Depth:      pullDepth,
@@ -85,10 +85,21 @@ func runPull(cmd *cobra.Command, args []string) {
 
 	if result.FastForward {
 		green.Printf("Fast-forwarded '%s' to %s\n", branch, shortID(result.RemoteTip))
+		if result.ObjectsAdded > 0 || result.ObjectsUpdated > 0 || result.ObjectsRemoved > 0 {
+			fmt.Printf("  %d added, %d updated, %d removed\n",
+				result.ObjectsAdded, result.ObjectsUpdated, result.ObjectsRemoved)
+		}
 	}
 
 	if result.Diverged {
 		yellow.Printf("Your branch and '%s/%s' have diverged.\n", remoteName, branch)
 		yellow.Printf("Run 'wvc merge %s/%s' to integrate remote changes.\n", remoteName, branch)
+	}
+
+	if len(result.Warnings) > 0 {
+		yellow.Println("\nWarnings:")
+		for _, w := range result.Warnings {
+			yellow.Printf("  - %s\n", w.Message)
+		}
 	}
 }

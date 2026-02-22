@@ -38,6 +38,20 @@ type noopRepoLocker struct{}
 func (noopRepoLocker) LockWrite(string)   {}
 func (noopRepoLocker) UnlockWrite(string) {}
 
+// RepoManager provides lifecycle management for repositories.
+type RepoManager interface {
+	Create(name string) error
+	Delete(name string) error
+	List() ([]string, error)
+}
+
+// noopRepoManager is a no-op implementation for when no manager is needed.
+type noopRepoManager struct{}
+
+func (noopRepoManager) Create(string) error     { return nil }
+func (noopRepoManager) Delete(string) error     { return nil }
+func (noopRepoManager) List() ([]string, error) { return nil, nil }
+
 // ServerConfig holds configurable limits for the server.
 type ServerConfig struct {
 	MaxRequestBody    int64  // bytes, for JSON endpoints
@@ -58,14 +72,15 @@ func DefaultServerConfig() *ServerConfig {
 
 // Handler creates the HTTP handler with all routes and middleware.
 // The returned cleanup function stops background goroutines and should be
-// called on server shutdown. If locker is nil, a no-op locker is used.
-func Handler(repos RepoOpener, tokens TokenStore, cfg *ServerConfig, logger *slog.Logger, locker ...RepoLocker) (http.Handler, func()) {
-	var repoLocker RepoLocker
-	if len(locker) > 0 && locker[0] != nil {
-		repoLocker = locker[0]
-	} else {
-		repoLocker = noopRepoLocker{}
+// called on server shutdown. Nil locker and manager fall back to no-op implementations.
+func Handler(repos RepoOpener, tokens TokenStore, cfg *ServerConfig, logger *slog.Logger, locker RepoLocker, manager RepoManager) (http.Handler, func()) {
+	if locker == nil {
+		locker = noopRepoLocker{}
 	}
+	if manager == nil {
+		manager = noopRepoManager{}
+	}
+	repoLocker := locker
 	if cfg == nil {
 		cfg = DefaultServerConfig()
 	}
@@ -120,8 +135,9 @@ func Handler(repos RepoOpener, tokens TokenStore, cfg *ServerConfig, logger *slo
 		adminMux.HandleFunc("POST /admin/tokens", makeAdminCreateTokenHandler(tokens, logger))
 		adminMux.HandleFunc("DELETE /admin/tokens/{id}", makeAdminDeleteTokenHandler(tokens, logger))
 		adminMux.HandleFunc("GET /admin/tokens", makeAdminListTokensHandler(tokens, logger))
-		adminMux.HandleFunc("POST /admin/repos", handleNotImplemented)
-		adminMux.HandleFunc("DELETE /admin/repos/{name}", handleNotImplemented)
+		adminMux.HandleFunc("GET /admin/repos", makeAdminListReposHandler(manager, logger))
+		adminMux.HandleFunc("POST /admin/repos", makeAdminCreateRepoHandler(manager, logger))
+		adminMux.HandleFunc("DELETE /admin/repos/{name}", makeAdminDeleteRepoHandler(manager, logger))
 		adminMux.HandleFunc("POST /admin/repos/{repo}/gc", makeAdminGCHandler(repos, repoLocker, logger))
 		mux.Handle("/admin/", adminAuth(cfg.AdminToken, adminMux))
 	}
@@ -664,10 +680,6 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("ok"))
 }
 
-func handleNotImplemented(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not_implemented", "message": "endpoint not yet implemented"})
-}
-
 // --- Admin Auth ---
 
 func adminAuth(adminToken string, next http.Handler) http.Handler {
@@ -786,7 +798,71 @@ func makeAdminDeleteTokenHandler(tokens TokenStore, logger *slog.Logger) http.Ha
 			return
 		}
 
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// validRepoName reports whether name is safe to use as a repository directory name.
+func validRepoName(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		!strings.ContainsAny(name, `/\`)
+}
+
+func makeAdminListReposHandler(manager RepoManager, _ *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		repos, err := manager.List()
+		if err != nil {
+			internalError(w, "list repos", err)
+			return
+		}
+		if repos == nil {
+			repos = []string{}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"repos": repos})
+	}
+}
+
+func makeAdminCreateRepoHandler(manager RepoManager, _ *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": "invalid JSON"})
+			return
+		}
+		if !validRepoName(req.Name) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": "invalid repository name"})
+			return
+		}
+		if err := manager.Create(req.Name); err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "conflict", "message": err.Error()})
+				return
+			}
+			internalError(w, "create repo", err)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}
+}
+
+func makeAdminDeleteRepoHandler(manager RepoManager, _ *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": "repo name required"})
+			return
+		}
+		if err := manager.Delete(name); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": err.Error()})
+				return
+			}
+			internalError(w, "delete repo", err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

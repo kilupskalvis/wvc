@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kilupskalvis/wvc/internal/config"
 	"github.com/kilupskalvis/wvc/internal/models"
 	"github.com/kilupskalvis/wvc/internal/remote"
 	"github.com/kilupskalvis/wvc/internal/store"
+	"github.com/kilupskalvis/wvc/internal/weaviate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -199,7 +201,7 @@ func TestPull_FastForward(t *testing.T) {
 		},
 	}
 
-	result, err := Pull(context.Background(), st, client, PullOptions{
+	result, err := Pull(context.Background(), &config.Config{}, st, weaviate.NewMockClient(), client, PullOptions{
 		RemoteName: "origin",
 		Branch:     "main",
 	}, nil)
@@ -242,7 +244,7 @@ func TestPull_Diverged(t *testing.T) {
 		},
 	}
 
-	result, err := Pull(context.Background(), st, client, PullOptions{
+	result, err := Pull(context.Background(), &config.Config{}, st, weaviate.NewMockClient(), client, PullOptions{
 		RemoteName: "origin",
 		Branch:     "main",
 	}, nil)
@@ -271,7 +273,7 @@ func TestPull_UpToDate(t *testing.T) {
 		},
 	}
 
-	result, err := Pull(context.Background(), st, client, PullOptions{
+	result, err := Pull(context.Background(), &config.Config{}, st, weaviate.NewMockClient(), client, PullOptions{
 		RemoteName: "origin",
 		Branch:     "main",
 	}, nil)
@@ -295,7 +297,7 @@ func TestPull_CreatesBranch(t *testing.T) {
 		},
 	}
 
-	result, err := Pull(context.Background(), st, client, PullOptions{
+	result, err := Pull(context.Background(), &config.Config{}, st, weaviate.NewMockClient(), client, PullOptions{
 		RemoteName: "origin",
 		Branch:     "main",
 	}, nil)

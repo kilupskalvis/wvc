@@ -34,6 +34,35 @@ func (t *testRepoOpener) Open(name string) (metastore.MetaStore, blobstore.BlobS
 	return t.meta, t.blobs, nil
 }
 
+// testRepoManager implements RepoManager for tests.
+type testRepoManager struct {
+	repos []string
+}
+
+func (m *testRepoManager) Create(name string) error {
+	for _, r := range m.repos {
+		if r == name {
+			return fmt.Errorf("repository '%s' already exists", name)
+		}
+	}
+	m.repos = append(m.repos, name)
+	return nil
+}
+
+func (m *testRepoManager) Delete(name string) error {
+	for i, r := range m.repos {
+		if r == name {
+			m.repos = append(m.repos[:i], m.repos[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("repository '%s' not found", name)
+}
+
+func (m *testRepoManager) List() ([]string, error) {
+	return m.repos, nil
+}
+
 // testTokenStore implements TokenStore for tests.
 type testTokenStore struct {
 	tokens map[string]*TokenInfo
@@ -109,7 +138,7 @@ func newTestServer(t *testing.T) (*httptest.Server, metastore.MetaStore, blobsto
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := DefaultServerConfig()
 
-	h, cleanup := Handler(repos, tokens, cfg, logger)
+	h, cleanup := Handler(repos, tokens, cfg, logger, nil, nil)
 	t.Cleanup(cleanup)
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
@@ -396,6 +425,128 @@ func TestNegotiatePull_Fresh(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 	assert.Equal(t, "c1", result.RemoteTip)
 	assert.Equal(t, []string{"c1"}, result.MissingCommits)
+}
+
+// newAdminTestServer creates a test server with admin auth and a testRepoManager.
+// Returns the server, the repo manager, and the raw admin token.
+func newAdminTestServer(t *testing.T) (*httptest.Server, *testRepoManager, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	meta, err := metastore.NewBboltStore(filepath.Join(tmpDir, "meta.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { meta.Close() })
+
+	blobs, err := blobstore.NewFSStore(filepath.Join(tmpDir, "blobs"))
+	require.NoError(t, err)
+
+	repos := &testRepoOpener{meta: meta, blobs: blobs}
+	manager := &testRepoManager{}
+	tokens := &testTokenStore{tokens: map[string]*TokenInfo{}}
+
+	rawAdminToken := "admin-test-token-123"
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	cfg := DefaultServerConfig()
+	cfg.AdminToken = rawAdminToken
+
+	h, cleanup := Handler(repos, tokens, cfg, logger, nil, manager)
+	t.Cleanup(cleanup)
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
+
+	return ts, manager, rawAdminToken
+}
+
+func adminReq(method, url, adminToken string, body io.Reader) *http.Request {
+	req, _ := http.NewRequest(method, url, body)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req
+}
+
+func TestAdminRepos_ListEmpty(t *testing.T) {
+	ts, _, adminToken := newAdminTestServer(t)
+
+	req := adminReq("GET", ts.URL+"/admin/repos", adminToken, nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string][]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Empty(t, result["repos"])
+}
+
+func TestAdminRepos_CreateAndList(t *testing.T) {
+	ts, _, adminToken := newAdminTestServer(t)
+
+	// Create a repo
+	body, _ := json.Marshal(map[string]string{"name": "myrepo"})
+	req := adminReq("POST", ts.URL+"/admin/repos", adminToken, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	// List should now contain the repo
+	req = adminReq("GET", ts.URL+"/admin/repos", adminToken, nil)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string][]string
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, []string{"myrepo"}, result["repos"])
+}
+
+func TestAdminRepos_CreateDuplicate(t *testing.T) {
+	ts, manager, adminToken := newAdminTestServer(t)
+	manager.repos = []string{"existing"}
+
+	body, _ := json.Marshal(map[string]string{"name": "existing"})
+	req := adminReq("POST", ts.URL+"/admin/repos", adminToken, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+}
+
+func TestAdminRepos_CreateInvalidName(t *testing.T) {
+	ts, _, adminToken := newAdminTestServer(t)
+
+	body, _ := json.Marshal(map[string]string{"name": "bad/name"})
+	req := adminReq("POST", ts.URL+"/admin/repos", adminToken, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestAdminRepos_Delete(t *testing.T) {
+	ts, manager, adminToken := newAdminTestServer(t)
+	manager.repos = []string{"todelete"}
+
+	req := adminReq("DELETE", ts.URL+"/admin/repos/todelete", adminToken, nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Empty(t, manager.repos)
+}
+
+func TestAdminRepos_DeleteNotFound(t *testing.T) {
+	ts, _, adminToken := newAdminTestServer(t)
+
+	req := adminReq("DELETE", ts.URL+"/admin/repos/ghost", adminToken, nil)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestAdminRepos_AuthRequired(t *testing.T) {
+	ts, _, _ := newAdminTestServer(t)
+
+	resp, err := http.Get(ts.URL + "/admin/repos")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func TestRepoInfo(t *testing.T) {
