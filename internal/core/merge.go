@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -486,10 +484,14 @@ func applyMergedState(ctx context.Context, st *store.Store, client weaviate.Clie
 func createMergeCommit(ctx context.Context, cfg *config.Config, st *store.Store, client weaviate.ClientInterface, parent1, parent2, message string, stats *StateRestoreStats) (*models.Commit, error) {
 	now := time.Now()
 
-	// Generate commit ID
-	data := fmt.Sprintf("%s|%s|%s|%s", message, now.Format(time.RFC3339Nano), parent1, parent2)
-	hash := sha256.Sum256([]byte(data))
-	commitID := hex.EncodeToString(hash[:])
+	// Get uncommitted operations for content-addressable commit ID
+	uncommittedOps, err := st.GetUncommittedOperations()
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate commit ID — for merges, include both parents in the hash
+	commitID := models.GenerateMergeCommitID(message, now, parent1, parent2, uncommittedOps)
 
 	// Capture schema snapshot
 	if err := captureSchemaSnapshot(ctx, st, client, commitID); err != nil {
@@ -505,22 +507,18 @@ func createMergeCommit(ctx context.Context, cfg *config.Config, st *store.Store,
 		OperationCount: stats.Added + stats.Updated + stats.Removed,
 	}
 
-	// Mark operations as committed
-	if _, err := st.MarkOperationsCommitted(commitID); err != nil {
-		return nil, err
+	// Atomically: mark operations committed, create commit, set HEAD, update branch
+	branchName, _ := st.GetCurrentBranch()
+	branchExists := false
+	if branchName != "" {
+		existing, _ := st.GetBranch(branchName)
+		branchExists = existing != nil
+	}
+	if _, err := st.FinalizeCommit(commit, branchName, branchExists); err != nil {
+		return nil, fmt.Errorf("finalize merge commit: %w", err)
 	}
 
-	// Save commit
-	if err := st.CreateCommit(commit); err != nil {
-		return nil, err
-	}
-
-	// Update HEAD
-	if err := st.SetHEAD(commitID); err != nil {
-		return nil, err
-	}
-
-	// Rebuild known objects
+	// Rebuild known objects (non-fatal)
 	useCursor := cfg.SupportsCursorPagination()
 	if err := UpdateKnownState(ctx, st, client, useCursor); err != nil {
 		// Non-fatal
@@ -529,12 +527,16 @@ func createMergeCommit(ctx context.Context, cfg *config.Config, st *store.Store,
 	return commit, nil
 }
 
-// hashObjWithVec returns a hash for an objectWithVector (or empty string if nil)
+// hashObjWithVec returns a hash for an objectWithVector (or empty string if nil).
+// Includes the vector hash so that vector-only changes are detected as conflicts.
 func hashObjWithVec(obj *objectWithVector) string {
 	if obj == nil || obj.Object == nil {
 		return ""
 	}
 	hash, _ := weaviate.HashObjectFull(obj.Object)
+	if obj.VectorHash != "" {
+		hash = hash + ":" + obj.VectorHash
+	}
 	return hash
 }
 

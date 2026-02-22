@@ -1,107 +1,260 @@
 package store
 
 import (
-	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/kilupskalvis/wvc/internal/models"
+	bolt "go.etcd.io/bbolt"
 )
 
-// CreateBranch creates a new branch pointing to a commit
+const headBranchKey = "HEAD_BRANCH"
+
+// CreateBranch stores a new branch with the given name and commit ID.
 func (s *Store) CreateBranch(name, commitID string) error {
-	_, err := s.db.Exec(
-		`INSERT INTO branches (name, commit_id) VALUES (?, ?)`,
-		name, commitID,
-	)
-	return err
-}
-
-// GetBranch retrieves a branch by name
-func (s *Store) GetBranch(name string) (*models.Branch, error) {
-	var branch models.Branch
-	var createdAt string
-	err := s.db.QueryRow(
-		`SELECT name, commit_id, created_at FROM branches WHERE name = ?`,
-		name,
-	).Scan(&branch.Name, &branch.CommitID, &createdAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	branch.CreatedAt = parseTimestamp(createdAt)
-	return &branch, nil
-}
-
-// ListBranches returns all branches
-func (s *Store) ListBranches() ([]*models.Branch, error) {
-	rows, err := s.db.Query(
-		`SELECT name, commit_id, created_at FROM branches ORDER BY name`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var branches []*models.Branch
-	for rows.Next() {
-		var branch models.Branch
-		var createdAt string
-		if err := rows.Scan(&branch.Name, &branch.CommitID, &createdAt); err != nil {
-			return nil, err
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketBranches)
+		if bucket == nil {
+			return fmt.Errorf("branches bucket not found")
 		}
-		branch.CreatedAt = parseTimestamp(createdAt)
-		branches = append(branches, &branch)
-	}
-	return branches, rows.Err()
+
+		branch := &models.Branch{
+			Name:      name,
+			CommitID:  commitID,
+			CreatedAt: time.Now(),
+		}
+
+		data, err := json.Marshal(branch)
+		if err != nil {
+			return fmt.Errorf("marshal branch: %w", err)
+		}
+
+		return bucket.Put([]byte(name), data)
+	})
 }
 
-// UpdateBranch updates a branch to point to a new commit
+// GetBranch retrieves a branch by name. Returns (nil, nil) if not found.
+func (s *Store) GetBranch(name string) (*models.Branch, error) {
+	var branch *models.Branch
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketBranches)
+		if bucket == nil {
+			return nil
+		}
+
+		data := bucket.Get([]byte(name))
+		if data == nil {
+			return nil
+		}
+
+		branch = &models.Branch{}
+		return json.Unmarshal(data, branch)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return branch, nil
+}
+
+// ListBranches returns all branches sorted by name.
+func (s *Store) ListBranches() ([]*models.Branch, error) {
+	var branches []*models.Branch
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketBranches)
+		if bucket == nil {
+			return nil
+		}
+
+		return bucket.ForEach(func(k, v []byte) error {
+			var branch models.Branch
+			if err := json.Unmarshal(v, &branch); err != nil {
+				return fmt.Errorf("unmarshal branch: %w", err)
+			}
+			branches = append(branches, &branch)
+			return nil
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(branches, func(i, j int) bool {
+		return branches[i].Name < branches[j].Name
+	})
+
+	return branches, nil
+}
+
+// UpdateBranch updates an existing branch's commit ID.
 func (s *Store) UpdateBranch(name, commitID string) error {
-	result, err := s.db.Exec(
-		`UPDATE branches SET commit_id = ? WHERE name = ?`,
-		commitID, name,
-	)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("branch '%s' not found", name)
-	}
-	return nil
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketBranches)
+		if bucket == nil {
+			return fmt.Errorf("branches bucket not found")
+		}
+
+		data := bucket.Get([]byte(name))
+		if data == nil {
+			return fmt.Errorf("branch not found: %s", name)
+		}
+
+		var branch models.Branch
+		if err := json.Unmarshal(data, &branch); err != nil {
+			return fmt.Errorf("unmarshal branch: %w", err)
+		}
+
+		branch.CommitID = commitID
+
+		updatedData, err := json.Marshal(branch)
+		if err != nil {
+			return fmt.Errorf("marshal branch: %w", err)
+		}
+
+		return bucket.Put([]byte(name), updatedData)
+	})
 }
 
-// DeleteBranch removes a branch
+// DeleteBranch removes a branch by name.
 func (s *Store) DeleteBranch(name string) error {
-	result, err := s.db.Exec(`DELETE FROM branches WHERE name = ?`, name)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return fmt.Errorf("branch '%s' not found", name)
-	}
-	return nil
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketBranches)
+		if bucket == nil {
+			return fmt.Errorf("branches bucket not found")
+		}
+
+		data := bucket.Get([]byte(name))
+		if data == nil {
+			return fmt.Errorf("branch not found: %s", name)
+		}
+
+		return bucket.Delete([]byte(name))
+	})
 }
 
-// GetCurrentBranch returns the current branch name (empty if detached)
+// GetCurrentBranch retrieves the current HEAD branch name from the kv bucket.
+// Returns ("", nil) if no branch is set.
 func (s *Store) GetCurrentBranch() (string, error) {
-	return s.GetValue("HEAD_BRANCH")
+	var branchName string
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketKV)
+		if bucket == nil {
+			return nil
+		}
+
+		data := bucket.Get([]byte(headBranchKey))
+		if data != nil {
+			branchName = string(data)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	return branchName, nil
 }
 
-// SetCurrentBranch sets the current branch (empty string for detached)
+// SetCurrentBranch sets the current HEAD branch name in the kv bucket.
 func (s *Store) SetCurrentBranch(name string) error {
-	return s.SetValue("HEAD_BRANCH", name)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketKV)
+		if bucket == nil {
+			return fmt.Errorf("kv bucket not found")
+		}
+
+		return bucket.Put([]byte(headBranchKey), []byte(name))
+	})
 }
 
-// BranchExists checks if a branch exists
+// UpdateBranchAndHEAD atomically updates a branch pointer and HEAD in a single transaction.
+func (s *Store) UpdateBranchAndHEAD(branchName, commitID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		// Update branch
+		branchBucket := tx.Bucket(bucketBranches)
+		if branchBucket == nil {
+			return fmt.Errorf("branches bucket not found (database not initialized?)")
+		}
+		data := branchBucket.Get([]byte(branchName))
+		if data == nil {
+			return fmt.Errorf("branch not found: %s", branchName)
+		}
+		var branch models.Branch
+		if err := json.Unmarshal(data, &branch); err != nil {
+			return fmt.Errorf("unmarshal branch: %w", err)
+		}
+		branch.CommitID = commitID
+		updatedData, err := json.Marshal(branch)
+		if err != nil {
+			return fmt.Errorf("marshal branch: %w", err)
+		}
+		if err := branchBucket.Put([]byte(branchName), updatedData); err != nil {
+			return err
+		}
+
+		// Update HEAD
+		kvBucket := tx.Bucket(bucketKV)
+		if kvBucket == nil {
+			return fmt.Errorf("kv bucket not found (database not initialized?)")
+		}
+		return kvBucket.Put([]byte("HEAD"), []byte(commitID))
+	})
+}
+
+// CreateBranchAndHEAD atomically creates a branch and sets HEAD in a single transaction.
+func (s *Store) CreateBranchAndHEAD(branchName, commitID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		branchBucket := tx.Bucket(bucketBranches)
+		if branchBucket == nil {
+			return fmt.Errorf("branches bucket not found (database not initialized?)")
+		}
+		branch := &models.Branch{
+			Name:      branchName,
+			CommitID:  commitID,
+			CreatedAt: time.Now(),
+		}
+		branchData, err := json.Marshal(branch)
+		if err != nil {
+			return fmt.Errorf("marshal branch: %w", err)
+		}
+		if err := branchBucket.Put([]byte(branchName), branchData); err != nil {
+			return err
+		}
+
+		kvBucket := tx.Bucket(bucketKV)
+		if kvBucket == nil {
+			return fmt.Errorf("kv bucket not found (database not initialized?)")
+		}
+		return kvBucket.Put([]byte("HEAD"), []byte(commitID))
+	})
+}
+
+// BranchExists checks if a branch with the given name exists.
 func (s *Store) BranchExists(name string) (bool, error) {
-	var count int
-	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM branches WHERE name = ?`,
-		name,
-	).Scan(&count)
-	return count > 0, err
+	var exists bool
+
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketBranches)
+		if bucket == nil {
+			return nil
+		}
+
+		data := bucket.Get([]byte(name))
+		exists = data != nil
+		return nil
+	})
+
+	if err != nil {
+		return false, err
+	}
+
+	return exists, nil
 }

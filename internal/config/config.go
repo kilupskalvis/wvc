@@ -83,7 +83,7 @@ func (c *Config) WVCPath() string {
 	return c.path
 }
 
-// DatabasePath returns the path to the SQLite database
+// DatabasePath returns the path to the bbolt database
 func (c *Config) DatabasePath() string {
 	return filepath.Join(c.path, DatabaseFile)
 }

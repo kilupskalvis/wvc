@@ -6,6 +6,9 @@ import (
 	"os"
 
 	"github.com/kilupskalvis/wvc/internal/config"
+	"github.com/kilupskalvis/wvc/internal/core"
+	"github.com/kilupskalvis/wvc/internal/models"
+	"github.com/kilupskalvis/wvc/internal/remote"
 	"github.com/kilupskalvis/wvc/internal/store"
 	"github.com/kilupskalvis/wvc/internal/weaviate"
 	"github.com/spf13/cobra"
@@ -93,12 +96,77 @@ func init() {
 	rootCmd.AddCommand(checkoutCmd)
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(stashCmd)
+	rootCmd.AddCommand(remoteCmd)
+	rootCmd.AddCommand(pushCmd)
+	rootCmd.AddCommand(pullCmd)
+	rootCmd.AddCommand(fetchCmd)
 }
 
 // exitError prints an error and exits
 func exitError(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// resolveRemoteClient resolves the remote/branch defaults, loads the remote config
+// and token, and returns a ready-to-use retry client along with the resolved names.
+func resolveRemoteClient(st *store.Store, remoteName, branch string) (*remote.RetryClient, *models.Remote, string, string) {
+	var err error
+	remoteName, branch, err = core.ResolveRemoteAndBranch(st, remoteName, branch)
+	if err != nil {
+		exitError("%v", err)
+	}
+
+	remoteInfo, err := core.GetRemote(st, remoteName)
+	if err != nil {
+		exitError("%v", err)
+	}
+
+	token, err := core.GetRemoteToken(st, remoteName)
+	if err != nil {
+		exitError("get token: %v", err)
+	}
+	if token == "" {
+		exitError("no token configured for remote '%s' — run 'wvc remote set-token %s'", remoteName, remoteName)
+	}
+
+	baseURL, repoName, err := core.ParseRemoteURL(remoteInfo.URL)
+	if err != nil {
+		exitError("%v", err)
+	}
+
+	client := remote.NewRetryClient(
+		remote.NewHTTPClient(baseURL, repoName, token),
+		remote.DefaultRetryConfig(),
+	)
+
+	return client, remoteInfo, remoteName, branch
+}
+
+// resolveRemoteClientByName loads the remote config and token for a known remote name.
+func resolveRemoteClientByName(st *store.Store, remoteName string) *remote.RetryClient {
+	remoteInfo, err := core.GetRemote(st, remoteName)
+	if err != nil {
+		exitError("%v", err)
+	}
+
+	token, err := core.GetRemoteToken(st, remoteName)
+	if err != nil {
+		exitError("get token: %v", err)
+	}
+	if token == "" {
+		exitError("no token configured for remote '%s'", remoteName)
+	}
+
+	baseURL, repoName, err := core.ParseRemoteURL(remoteInfo.URL)
+	if err != nil {
+		exitError("%v", err)
+	}
+
+	return remote.NewRetryClient(
+		remote.NewHTTPClient(baseURL, repoName, token),
+		remote.DefaultRetryConfig(),
+	)
 }
 
 // shortID returns first 8 characters of an ID

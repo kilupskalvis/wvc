@@ -273,13 +273,17 @@ func HashSchema(schema *models.WeaviateSchema) string {
 		return classes[i].Class < classes[j].Class
 	})
 
-	// Sort properties within each class
-	for _, class := range classes {
+	// Deep-copy class pointers so we don't mutate the caller's property order
+	for i, class := range classes {
+		cp := *class
 		if class.Properties != nil {
-			sort.Slice(class.Properties, func(i, j int) bool {
-				return class.Properties[i].Name < class.Properties[j].Name
+			cp.Properties = make([]*models.WeaviateProperty, len(class.Properties))
+			copy(cp.Properties, class.Properties)
+			sort.Slice(cp.Properties, func(a, b int) bool {
+				return cp.Properties[a].Name < cp.Properties[b].Name
 			})
 		}
+		classes[i] = &cp
 	}
 
 	sortedSchema := &models.WeaviateSchema{Classes: classes}

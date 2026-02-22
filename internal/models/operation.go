@@ -2,7 +2,7 @@ package models
 
 import "time"
 
-// OperationType represents the type of database operation
+// OperationType represents the type of database operation.
 type OperationType string
 
 const (
@@ -11,9 +11,10 @@ const (
 	OperationDelete OperationType = "delete"
 )
 
-// Operation represents a single database operation
+// Operation represents a single database operation.
+// Operations are identified by (CommitID, Seq) — the 0-based index within their commit.
 type Operation struct {
-	ID                 int64         `json:"id"`
+	Seq                int           `json:"seq"`
 	Timestamp          time.Time     `json:"timestamp"`
 	Type               OperationType `json:"operation_type"`
 	ClassName          string        `json:"class_name"`

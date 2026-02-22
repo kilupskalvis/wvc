@@ -2,8 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -36,45 +34,9 @@ func CreateCommit(ctx context.Context, cfg *config.Config, st *store.Store, clie
 		}
 	}
 
-	parentID, err := st.GetHEAD()
+	commit, err := finalizeCommit(ctx, st, client, message, diff.TotalChanges())
 	if err != nil {
 		return nil, err
-	}
-
-	now := time.Now()
-	commitID := generateCommitID(message, now, parentID)
-
-	if err := captureSchemaSnapshot(ctx, st, client, commitID); err != nil {
-		return nil, fmt.Errorf("failed to capture schema: %w", err)
-	}
-
-	commit := &models.Commit{
-		ID:             commitID,
-		ParentID:       parentID,
-		Message:        message,
-		Timestamp:      now,
-		OperationCount: diff.TotalChanges(),
-	}
-
-	if _, err := st.MarkOperationsCommitted(commitID); err != nil {
-		return nil, err
-	}
-
-	if err := st.CreateCommit(commit); err != nil {
-		return nil, err
-	}
-
-	if err := st.SetHEAD(commitID); err != nil {
-		return nil, err
-	}
-
-	// Update branch pointer if on a branch
-	if branch, _ := st.GetCurrentBranch(); branch != "" {
-		_ = st.UpdateBranch(branch, commitID)
-	} else if parentID == "" {
-		// First commit - create main branch and set as current
-		_ = st.CreateBranch("main", commitID)
-		_ = st.SetCurrentBranch("main")
 	}
 
 	useCursor := cfg.SupportsCursorPagination()
@@ -101,10 +63,9 @@ func CreateCommitFromStaging(ctx context.Context, cfg *config.Config, st *store.
 		return nil, fmt.Errorf("nothing to commit (use \"wvc add\" to stage changes)")
 	}
 
-	now := time.Now()
 	for _, sc := range stagedChanges {
 		op := &models.Operation{
-			Timestamp:    now,
+			Timestamp:    time.Now(),
 			Type:         models.OperationType(sc.ChangeType),
 			ClassName:    sc.ClassName,
 			ObjectID:     sc.ObjectID,
@@ -116,44 +77,9 @@ func CreateCommitFromStaging(ctx context.Context, cfg *config.Config, st *store.
 		}
 	}
 
-	parentID, err := st.GetHEAD()
+	commit, err := finalizeCommit(ctx, st, client, message, len(stagedChanges))
 	if err != nil {
 		return nil, err
-	}
-
-	commitID := generateCommitID(message, now, parentID)
-
-	if err := captureSchemaSnapshot(ctx, st, client, commitID); err != nil {
-		return nil, fmt.Errorf("failed to capture schema: %w", err)
-	}
-
-	commit := &models.Commit{
-		ID:             commitID,
-		ParentID:       parentID,
-		Message:        message,
-		Timestamp:      now,
-		OperationCount: len(stagedChanges),
-	}
-
-	if _, err := st.MarkOperationsCommitted(commitID); err != nil {
-		return nil, err
-	}
-
-	if err := st.CreateCommit(commit); err != nil {
-		return nil, err
-	}
-
-	if err := st.SetHEAD(commitID); err != nil {
-		return nil, err
-	}
-
-	// Update branch pointer if on a branch
-	if branch, _ := st.GetCurrentBranch(); branch != "" {
-		_ = st.UpdateBranch(branch, commitID)
-	} else if parentID == "" {
-		// First commit - create main branch and set as current
-		_ = st.CreateBranch("main", commitID)
-		_ = st.SetCurrentBranch("main")
 	}
 
 	if err := updateKnownStateForStagedChanges(ctx, st, client, stagedChanges); err != nil {
@@ -190,11 +116,48 @@ func updateKnownStateForStagedChanges(ctx context.Context, st *store.Store, clie
 	return nil
 }
 
-// generateCommitID generates a unique commit ID
-func generateCommitID(message string, timestamp time.Time, parentID string) string {
-	data := fmt.Sprintf("%s|%s|%s", message, timestamp.Format(time.RFC3339Nano), parentID)
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
+// finalizeCommit performs the shared commit finalization: generate ID, capture
+// schema, mark operations, create commit, set HEAD, and update branch pointer.
+func finalizeCommit(ctx context.Context, st *store.Store, client weaviate.ClientInterface, message string, opCount int) (*models.Commit, error) {
+	parentID, err := st.GetHEAD()
+	if err != nil {
+		return nil, err
+	}
+
+	uncommittedOps, err := st.GetUncommittedOperations()
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	commitID := models.GenerateCommitID(message, now, parentID, uncommittedOps)
+
+	if err := captureSchemaSnapshot(ctx, st, client, commitID); err != nil {
+		return nil, fmt.Errorf("capture schema: %w", err)
+	}
+
+	commit := &models.Commit{
+		ID:             commitID,
+		ParentID:       parentID,
+		Message:        message,
+		Timestamp:      now,
+		OperationCount: opCount,
+	}
+
+	// Determine branch state before the atomic write
+	branchName, _ := st.GetCurrentBranch()
+	branchExists := false
+	if branchName != "" {
+		existing, _ := st.GetBranch(branchName)
+		branchExists = existing != nil
+	}
+
+	// Atomically: mark operations committed, create commit, set HEAD, update branch
+	if _, err := st.FinalizeCommit(commit, branchName, branchExists); err != nil {
+		return nil, fmt.Errorf("finalize commit: %w", err)
+	}
+
+	return commit, nil
 }
 
 // captureSchemaSnapshot fetches current schema and saves it with the commit

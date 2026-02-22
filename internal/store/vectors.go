@@ -1,14 +1,16 @@
-// Package store provides SQLite-based persistence for WVC.
+// Package store provides bbolt-based persistence for WVC.
 package store
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/kilupskalvis/wvc/internal/models"
 )
@@ -17,6 +19,13 @@ var (
 	ErrVectorNotFound = errors.New("vector blob not found")
 	ErrInvalidVector  = errors.New("invalid vector format")
 )
+
+// vectorBlobRecord stores vector data with reference counting
+type vectorBlobRecord struct {
+	Data       []byte `json:"data"`
+	Dimensions int    `json:"dimensions"`
+	RefCount   int    `json:"ref_count"`
+}
 
 // VectorToBytes converts a vector (interface{}) to raw binary float32 bytes (little-endian).
 // Returns the bytes, dimension count, and any error.
@@ -117,13 +126,42 @@ func (s *Store) SaveVectorBlob(data []byte, dimensions int) (string, error) {
 
 	hash := HashVector(data)
 
-	// Try to insert, on conflict increment ref_count
-	_, err := s.db.Exec(`
-		INSERT INTO vector_blobs (hash, data, dimensions, ref_count)
-		VALUES (?, ?, ?, 1)
-		ON CONFLICT(hash) DO UPDATE SET ref_count = ref_count + 1`,
-		hash, data, dimensions,
-	)
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists(bucketVectorBlobs)
+		if err != nil {
+			return fmt.Errorf("create bucket: %w", err)
+		}
+
+		key := []byte(hash)
+		existing := bucket.Get(key)
+
+		if existing != nil {
+			// Increment ref count on duplicate
+			var record vectorBlobRecord
+			if err := json.Unmarshal(existing, &record); err != nil {
+				return fmt.Errorf("unmarshal existing record: %w", err)
+			}
+			record.RefCount++
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				return fmt.Errorf("marshal record: %w", err)
+			}
+			return bucket.Put(key, encoded)
+		}
+
+		// Create new record
+		record := vectorBlobRecord{
+			Data:       data,
+			Dimensions: dimensions,
+			RefCount:   1,
+		}
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("marshal record: %w", err)
+		}
+		return bucket.Put(key, encoded)
+	})
+
 	if err != nil {
 		return "", fmt.Errorf("failed to save vector blob: %w", err)
 	}
@@ -141,15 +179,31 @@ func (s *Store) GetVectorBlob(hash string) ([]byte, int, error) {
 	var data []byte
 	var dimensions int
 
-	err := s.db.QueryRow(`
-		SELECT data, dimensions FROM vector_blobs WHERE hash = ?`,
-		hash,
-	).Scan(&data, &dimensions)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketVectorBlobs)
+		if bucket == nil {
+			return ErrVectorNotFound
+		}
 
-	if err == sql.ErrNoRows {
-		return nil, 0, ErrVectorNotFound
-	}
+		value := bucket.Get([]byte(hash))
+		if value == nil {
+			return ErrVectorNotFound
+		}
+
+		var record vectorBlobRecord
+		if err := json.Unmarshal(value, &record); err != nil {
+			return fmt.Errorf("unmarshal record: %w", err)
+		}
+
+		data = record.Data
+		dimensions = record.Dimensions
+		return nil
+	})
+
 	if err != nil {
+		if errors.Is(err, ErrVectorNotFound) {
+			return nil, 0, ErrVectorNotFound
+		}
 		return nil, 0, fmt.Errorf("failed to get vector blob: %w", err)
 	}
 
@@ -162,20 +216,31 @@ func (s *Store) IncrementVectorRefCount(hash string) error {
 		return nil
 	}
 
-	result, err := s.db.Exec(`
-		UPDATE vector_blobs SET ref_count = ref_count + 1 WHERE hash = ?`,
-		hash,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to increment vector ref count: %w", err)
-	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketVectorBlobs)
+		if bucket == nil {
+			return ErrVectorNotFound
+		}
 
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return ErrVectorNotFound
-	}
+		key := []byte(hash)
+		value := bucket.Get(key)
+		if value == nil {
+			return ErrVectorNotFound
+		}
 
-	return nil
+		var record vectorBlobRecord
+		if err := json.Unmarshal(value, &record); err != nil {
+			return fmt.Errorf("unmarshal record: %w", err)
+		}
+
+		record.RefCount++
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("marshal record: %w", err)
+		}
+
+		return bucket.Put(key, encoded)
+	})
 }
 
 // DecrementVectorRefCount decrements the reference count for a vector blob.
@@ -185,24 +250,42 @@ func (s *Store) DecrementVectorRefCount(hash string) (bool, error) {
 		return false, nil
 	}
 
-	// Decrement ref_count
-	_, err := s.db.Exec(`
-		UPDATE vector_blobs SET ref_count = ref_count - 1 WHERE hash = ?`,
-		hash,
-	)
+	var deleted bool
+
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketVectorBlobs)
+		if bucket == nil {
+			return ErrVectorNotFound
+		}
+
+		key := []byte(hash)
+		value := bucket.Get(key)
+		if value == nil {
+			return ErrVectorNotFound
+		}
+
+		var record vectorBlobRecord
+		if err := json.Unmarshal(value, &record); err != nil {
+			return fmt.Errorf("unmarshal record: %w", err)
+		}
+
+		record.RefCount--
+		if record.RefCount <= 0 {
+			deleted = true
+			return bucket.Delete(key)
+		}
+
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("marshal record: %w", err)
+		}
+
+		return bucket.Put(key, encoded)
+	})
+
 	if err != nil {
 		return false, fmt.Errorf("failed to decrement vector ref count: %w", err)
 	}
 
-	// Delete if ref_count is 0 or negative
-	result, err := s.db.Exec(`
-		DELETE FROM vector_blobs WHERE hash = ? AND ref_count <= 0`,
-		hash,
-	)
-	if err != nil {
-		return false, fmt.Errorf("failed to cleanup vector blob: %w", err)
-	}
-
-	rows, _ := result.RowsAffected()
-	return rows > 0, nil
+	return deleted, nil
 }

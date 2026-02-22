@@ -81,7 +81,13 @@ func RevertCommitWithWarnings(ctx context.Context, cfg *config.Config, st *store
 	// Create revert commit
 	revertMessage := fmt.Sprintf("Revert: %s", commit.Message)
 	now := time.Now()
-	revertCommitID := generateCommitID(revertMessage, now, commit.ID)
+
+	// Get uncommitted operations (the reverse ops we just recorded) for content-addressable ID
+	uncommittedOps, err := st.GetUncommittedOperations()
+	if err != nil {
+		return nil, err
+	}
+	revertCommitID := models.GenerateCommitID(revertMessage, now, commit.ID, uncommittedOps)
 
 	// Capture current schema state for the revert commit
 	if err := captureSchemaSnapshot(ctx, st, client, revertCommitID); err != nil {
@@ -97,24 +103,15 @@ func RevertCommitWithWarnings(ctx context.Context, cfg *config.Config, st *store
 		OperationCount: len(operations),
 	}
 
-	// Mark operations as committed
-	if _, err := st.MarkOperationsCommitted(revertCommitID); err != nil {
-		return nil, err
+	// Atomically: mark operations committed, create commit, set HEAD, update branch
+	branchName, _ := st.GetCurrentBranch()
+	branchExists := false
+	if branchName != "" {
+		existing, _ := st.GetBranch(branchName)
+		branchExists = existing != nil
 	}
-
-	// Save revert commit
-	if err := st.CreateCommit(revertCommit); err != nil {
-		return nil, err
-	}
-
-	// Update HEAD
-	if err := st.SetHEAD(revertCommitID); err != nil {
-		return nil, err
-	}
-
-	// Update branch pointer if on a branch
-	if branch, _ := st.GetCurrentBranch(); branch != "" {
-		_ = st.UpdateBranch(branch, revertCommitID)
+	if _, err := st.FinalizeCommit(revertCommit, branchName, branchExists); err != nil {
+		return nil, fmt.Errorf("finalize revert commit: %w", err)
 	}
 
 	// Update known state
@@ -328,10 +325,14 @@ func applyReverseOperations(ctx context.Context, st *store.Store, client weaviat
 		}
 	}
 
-	// Mark original operations as reverted
-	opIDs := make([]int64, len(operations))
-	for i, op := range operations {
-		opIDs[i] = op.ID
+	// Mark original operations as reverted — all ops share the same commit ID
+	if len(operations) > 0 {
+		commitID := operations[0].CommitID
+		seqs := make([]int, len(operations))
+		for i, op := range operations {
+			seqs[i] = op.Seq
+		}
+		return st.MarkOperationsReverted(commitID, seqs)
 	}
-	return st.MarkOperationsReverted(opIDs)
+	return nil
 }

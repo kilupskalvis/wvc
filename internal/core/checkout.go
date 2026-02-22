@@ -329,19 +329,88 @@ func reconstructStateAtCommit(st *store.Store, targetCommitID string) (map[strin
 	return objects, nil
 }
 
-// getCommitPath returns commits from root to target in order
-// Note: This only follows the primary parent chain, not merge parents
+// getCommitPath returns all ancestor commits of targetCommitID in topological
+// order (parents before children), including commits reachable through merge parents.
 func getCommitPath(st *store.Store, targetCommitID string) ([]string, error) {
-	var path []string
-	currentID := targetCommitID
+	// Collect all ancestors via BFS
+	type commitInfo struct {
+		id            string
+		parentID      string
+		mergeParentID string
+	}
+	commits := make(map[string]*commitInfo)
+	queue := []string{targetCommitID}
 
-	for currentID != "" {
-		path = append([]string{currentID}, path...) // Prepend
-		commit, err := st.GetCommit(currentID)
-		if err != nil {
-			return nil, err
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		if current == "" {
+			continue
 		}
-		currentID = commit.ParentID
+		if _, seen := commits[current]; seen {
+			continue
+		}
+
+		commit, err := st.GetCommit(current)
+		if err != nil {
+			return nil, fmt.Errorf("get commit %s: %w", current, err)
+		}
+
+		commits[current] = &commitInfo{
+			id:            current,
+			parentID:      commit.ParentID,
+			mergeParentID: commit.MergeParentID,
+		}
+
+		if commit.ParentID != "" {
+			queue = append(queue, commit.ParentID)
+		}
+		if commit.MergeParentID != "" {
+			queue = append(queue, commit.MergeParentID)
+		}
+	}
+
+	// Topological sort via Kahn's algorithm (parents before children)
+	inDegree := make(map[string]int)
+	children := make(map[string][]string)
+	for id, ci := range commits {
+		if _, ok := inDegree[id]; !ok {
+			inDegree[id] = 0
+		}
+		if ci.parentID != "" {
+			if _, ok := commits[ci.parentID]; ok {
+				inDegree[id]++
+				children[ci.parentID] = append(children[ci.parentID], id)
+			}
+		}
+		if ci.mergeParentID != "" {
+			if _, ok := commits[ci.mergeParentID]; ok {
+				inDegree[id]++
+				children[ci.mergeParentID] = append(children[ci.mergeParentID], id)
+			}
+		}
+	}
+
+	var path []string
+	var roots []string
+	for id, deg := range inDegree {
+		if deg == 0 {
+			roots = append(roots, id)
+		}
+	}
+
+	for len(roots) > 0 {
+		node := roots[0]
+		roots = roots[1:]
+		path = append(path, node)
+
+		for _, child := range children[node] {
+			inDegree[child]--
+			if inDegree[child] == 0 {
+				roots = append(roots, child)
+			}
+		}
 	}
 
 	return path, nil
@@ -370,13 +439,13 @@ func restoreSchemaToCommit(ctx context.Context, st *store.Store, client weaviate
 		return warnings, err
 	}
 
-	// Compute diff: what changes needed to go from current to target
-	diff := diffSchemas(currentSchema, &targetSchemaStruct)
+	// Compute diff: target is "current", live Weaviate is "previous".
+	// ClassesAdded = in target but not in live Weaviate -> need to create.
+	// ClassesDeleted = in live Weaviate but not in target -> need to delete.
+	diff := diffSchemas(&targetSchemaStruct, currentSchema)
 
-	// Classes in current but not in target -> delete them
+	// Classes in live Weaviate but not in target -> delete them
 	for _, change := range diff.ClassesDeleted {
-		// In the diff, "deleted" means it's in current but not target
-		// So we need to delete it to reach target state
 		if err := client.DeleteClass(ctx, change.ClassName); err != nil {
 			warnings = append(warnings, CheckoutWarning{
 				Type:    "schema",
@@ -385,12 +454,10 @@ func restoreSchemaToCommit(ctx context.Context, st *store.Store, client weaviate
 		}
 	}
 
-	// Classes in target but not in current -> create them
+	// Classes in target but not in live Weaviate -> create them
 	for _, change := range diff.ClassesAdded {
-		// In the diff, "added" means it's in target but not current
-		// So we need to create it to reach target state
-		if change.PreviousValue != nil {
-			classJSON, _ := json.Marshal(change.PreviousValue)
+		if change.CurrentValue != nil {
+			classJSON, _ := json.Marshal(change.CurrentValue)
 			var class models.WeaviateClass
 			if err := json.Unmarshal(classJSON, &class); err != nil {
 				continue
@@ -404,11 +471,10 @@ func restoreSchemaToCommit(ctx context.Context, st *store.Store, client weaviate
 		}
 	}
 
-	// Handle property changes (Weaviate limitations apply)
+	// Properties in target but not in live Weaviate -> add them
 	for _, change := range diff.PropertiesAdded {
-		// Property in target but not current -> add it
-		if change.PreviousValue != nil {
-			propJSON, _ := json.Marshal(change.PreviousValue)
+		if change.CurrentValue != nil {
+			propJSON, _ := json.Marshal(change.CurrentValue)
 			var prop models.WeaviateProperty
 			if err := json.Unmarshal(propJSON, &prop); err != nil {
 				continue
