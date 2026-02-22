@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -75,8 +76,11 @@ func Fetch(ctx context.Context, st *store.Store, client remote.RemoteClient, opt
 		}, nil
 	}
 
-	// Download commits in topological order (oldest first, as returned by server)
+	// Phase 1: Download all commit bundles into memory (don't persist yet).
+	// This ensures that if anything fails during download, the local store
+	// remains untouched and consistent.
 	progress("downloading commits", 0, len(negotiation.MissingCommits))
+	bundles := make([]*remote.CommitBundle, 0, len(negotiation.MissingCommits))
 	var allVectorHashes []string
 	for i, commitID := range negotiation.MissingCommits {
 		progress("downloading commits", i+1, len(negotiation.MissingCommits))
@@ -85,11 +89,7 @@ func Fetch(ctx context.Context, st *store.Store, client remote.RemoteClient, opt
 		if err != nil {
 			return nil, fmt.Errorf("download commit %s: %w", commitID, err)
 		}
-
-		// Store the bundle locally
-		if err := st.InsertCommitBundle(bundle); err != nil {
-			return nil, fmt.Errorf("store commit %s: %w", commitID, err)
-		}
+		bundles = append(bundles, bundle)
 
 		// Collect vector hashes from operations
 		for _, op := range bundle.Operations {
@@ -99,7 +99,10 @@ func Fetch(ctx context.Context, st *store.Store, client remote.RemoteClient, opt
 		}
 	}
 
-	// Download missing vectors
+	// Phase 2: Download missing vectors BEFORE inserting any commits.
+	// If vector download fails, no commits have been persisted, so the store
+	// remains in a consistent state. Any already-downloaded vectors are
+	// content-addressable and will be reused on the next fetch attempt.
 	var vectorsFetched int
 	if len(allVectorHashes) > 0 {
 		// Deduplicate and filter out vectors we already have
@@ -114,6 +117,16 @@ func Fetch(ctx context.Context, st *store.Store, client remote.RemoteClient, opt
 			if err != nil {
 				return nil, fmt.Errorf("download vectors: %w", err)
 			}
+		}
+	}
+
+	// Phase 3: Now that all vectors are present locally, insert commit bundles.
+	// Each InsertCommitBundle call is individually atomic (single bbolt transaction).
+	progress("storing commits", 0, len(bundles))
+	for i, bundle := range bundles {
+		progress("storing commits", i+1, len(bundles))
+		if err := st.InsertCommitBundle(bundle); err != nil {
+			return nil, fmt.Errorf("store commit %s: %w", bundle.Commit.ID, err)
 		}
 	}
 
@@ -150,6 +163,15 @@ func Fetch(ctx context.Context, st *store.Store, client remote.RemoteClient, opt
 // Pull fetches from a remote and attempts to fast-forward the local branch.
 // If the branches have diverged, it reports divergence without merging.
 func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts PullOptions, progress FetchProgress) (*PullResult, error) {
+	// Check for uncommitted changes
+	uncommitted, err := st.GetUncommittedOperations()
+	if err != nil {
+		return nil, fmt.Errorf("check uncommitted operations: %w", err)
+	}
+	if len(uncommitted) > 0 {
+		return nil, fmt.Errorf("cannot pull with uncommitted changes; commit or stash them first")
+	}
+
 	// Fetch first
 	fetchResult, err := Fetch(ctx, st, client, FetchOptions(opts), progress)
 	if err != nil {
@@ -172,15 +194,8 @@ func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 
 	if localBranch == nil {
 		// Local branch doesn't exist (unborn) — create it pointing to remote tip
-		if err := st.CreateBranch(opts.Branch, fetchResult.RemoteTip); err != nil {
+		if err := st.CreateBranchAndHEAD(opts.Branch, fetchResult.RemoteTip); err != nil {
 			return nil, fmt.Errorf("create local branch: %w", err)
-		}
-		// Update HEAD if we're on this branch
-		currentBranch, _ := st.GetCurrentBranch()
-		if currentBranch == opts.Branch {
-			if err := st.SetHEAD(fetchResult.RemoteTip); err != nil {
-				return nil, fmt.Errorf("update HEAD: %w", err)
-			}
 		}
 		result.FastForward = true
 		return result, nil
@@ -190,14 +205,14 @@ func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 
 	// If local branch has no commits yet, fast-forward to remote tip
 	if localTip == "" {
-		if err := st.UpdateBranch(opts.Branch, fetchResult.RemoteTip); err != nil {
-			return nil, fmt.Errorf("update local branch: %w", err)
-		}
-		// Update HEAD if we're on this branch
 		currentBranch, err := st.GetCurrentBranch()
 		if err == nil && currentBranch == opts.Branch {
-			if err := st.SetHEAD(fetchResult.RemoteTip); err != nil {
-				return nil, fmt.Errorf("update HEAD: %w", err)
+			if err := st.UpdateBranchAndHEAD(opts.Branch, fetchResult.RemoteTip); err != nil {
+				return nil, fmt.Errorf("update local branch: %w", err)
+			}
+		} else {
+			if err := st.UpdateBranch(opts.Branch, fetchResult.RemoteTip); err != nil {
+				return nil, fmt.Errorf("update local branch: %w", err)
 			}
 		}
 		result.FastForward = true
@@ -218,15 +233,14 @@ func Pull(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 
 	if remoteAncestors[localTip] {
 		// Fast-forward: local tip is an ancestor of remote tip
-		if err := st.UpdateBranch(opts.Branch, fetchResult.RemoteTip); err != nil {
-			return nil, fmt.Errorf("update local branch: %w", err)
-		}
-
-		// Update HEAD if we're on this branch
 		currentBranch, err := st.GetCurrentBranch()
 		if err == nil && currentBranch == opts.Branch {
-			if err := st.SetHEAD(fetchResult.RemoteTip); err != nil {
-				return nil, fmt.Errorf("update HEAD: %w", err)
+			if err := st.UpdateBranchAndHEAD(opts.Branch, fetchResult.RemoteTip); err != nil {
+				return nil, fmt.Errorf("update local branch: %w", err)
+			}
+		} else {
+			if err := st.UpdateBranch(opts.Branch, fetchResult.RemoteTip); err != nil {
+				return nil, fmt.Errorf("update local branch: %w", err)
 			}
 		}
 
@@ -264,8 +278,11 @@ func filterMissingLocalVectors(st *store.Store, hashes []string) ([]string, erro
 
 		_, _, err := st.GetVectorBlob(hash)
 		if err != nil {
-			// Not found locally — need to download
-			missing = append(missing, hash)
+			if errors.Is(err, store.ErrVectorNotFound) {
+				missing = append(missing, hash)
+			} else {
+				return nil, fmt.Errorf("check local vector %s: %w", hash, err)
+			}
 		}
 	}
 

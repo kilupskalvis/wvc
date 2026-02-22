@@ -33,3 +33,7 @@ Thumbs.db
 
 # SQLite in-memory artifacts
 :memory:
+
+# Dev tools
+.claude/
+.wvc-vault/

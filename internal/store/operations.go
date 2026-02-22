@@ -12,7 +12,7 @@ import (
 
 // operationKey builds the bbolt key for an operation: "{commit_id}:{seq:04d}".
 func operationKey(commitID string, seq int) []byte {
-	return []byte(fmt.Sprintf("%s:%04d", commitID, seq))
+	return []byte(fmt.Sprintf("%s:%08d", commitID, seq))
 }
 
 // uncommittedPrefix is the key prefix for operations not yet assigned to a commit.
@@ -28,6 +28,9 @@ func uncommittedKey(seq int) []byte {
 func (s *Store) RecordOperation(op *models.Operation) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketOperations)
+		if b == nil {
+			return fmt.Errorf("operations bucket not found (database not initialized?)")
+		}
 
 		if op.CommitID == "" {
 			// Store as uncommitted — assign next sequence number
@@ -71,6 +74,9 @@ func (s *Store) GetUncommittedOperations() ([]*models.Operation, error) {
 	var ops []*models.Operation
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketOperations)
+		if b == nil {
+			return fmt.Errorf("operations bucket not found (database not initialized?)")
+		}
 		c := b.Cursor()
 		prefix := []byte(uncommittedPrefix)
 
@@ -91,6 +97,9 @@ func (s *Store) GetOperationsByCommit(commitID string) ([]*models.Operation, err
 	var ops []*models.Operation
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketOperations)
+		if b == nil {
+			return fmt.Errorf("operations bucket not found (database not initialized?)")
+		}
 		c := b.Cursor()
 		prefix := []byte(commitID + ":")
 
@@ -112,6 +121,9 @@ func (s *Store) MarkOperationsCommitted(commitID string) (int64, error) {
 	var count int64
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketOperations)
+		if b == nil {
+			return fmt.Errorf("operations bucket not found (database not initialized?)")
+		}
 
 		// Collect uncommitted operation keys
 		var keys [][]byte
@@ -160,6 +172,9 @@ func (s *Store) MarkOperationsCommitted(commitID string) (int64, error) {
 func (s *Store) MarkOperationsReverted(commitID string, seqs []int) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketOperations)
+		if b == nil {
+			return fmt.Errorf("operations bucket not found (database not initialized?)")
+		}
 		for _, seq := range seqs {
 			key := operationKey(commitID, seq)
 			v := b.Get(key)
@@ -193,7 +208,11 @@ func (s *Store) GetKnownObject(className, objectID string) (string, []byte, erro
 	key := className + ":" + objectID
 	var info knownObjectRecord
 	err := s.db.View(func(tx *bolt.Tx) error {
-		v := tx.Bucket(bucketKnownObjects).Get([]byte(key))
+		b := tx.Bucket(bucketKnownObjects)
+		if b == nil {
+			return fmt.Errorf("known_objects bucket not found (database not initialized?)")
+		}
+		v := b.Get([]byte(key))
 		if v == nil {
 			return fmt.Errorf("known object not found: %s/%s", className, objectID)
 		}
@@ -216,7 +235,11 @@ type knownObjectRecord struct {
 func (s *Store) GetAllKnownObjects() (map[string]*models.WeaviateObject, error) {
 	objects := make(map[string]*models.WeaviateObject)
 	err := s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketKnownObjects).ForEach(func(k, v []byte) error {
+		b := tx.Bucket(bucketKnownObjects)
+		if b == nil {
+			return fmt.Errorf("known_objects bucket not found (database not initialized?)")
+		}
+		return b.ForEach(func(k, v []byte) error {
 			var rec knownObjectRecord
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
@@ -240,7 +263,11 @@ func (s *Store) GetAllKnownObjects() (map[string]*models.WeaviateObject, error) 
 func (s *Store) GetAllKnownObjectsWithHashes() (map[string]*models.KnownObjectInfo, error) {
 	objects := make(map[string]*models.KnownObjectInfo)
 	err := s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketKnownObjects).ForEach(func(k, v []byte) error {
+		b := tx.Bucket(bucketKnownObjects)
+		if b == nil {
+			return fmt.Errorf("known_objects bucket not found (database not initialized?)")
+		}
+		return b.ForEach(func(k, v []byte) error {
 			var rec knownObjectRecord
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
@@ -267,7 +294,11 @@ func (s *Store) GetAllKnownObjectsWithHashes() (map[string]*models.KnownObjectIn
 func (s *Store) DeleteKnownObject(className, objectID string) error {
 	key := className + ":" + objectID
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketKnownObjects).Delete([]byte(key))
+		b := tx.Bucket(bucketKnownObjects)
+		if b == nil {
+			return fmt.Errorf("known_objects bucket not found (database not initialized?)")
+		}
+		return b.Delete([]byte(key))
 	})
 }
 
@@ -295,6 +326,10 @@ func (s *Store) SaveKnownObjectWithVector(className, objectID, objectHash, vecto
 		return fmt.Errorf("marshal known object: %w", err)
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketKnownObjects).Put([]byte(key), encoded)
+		b := tx.Bucket(bucketKnownObjects)
+		if b == nil {
+			return fmt.Errorf("known_objects bucket not found (database not initialized?)")
+		}
+		return b.Put([]byte(key), encoded)
 	})
 }

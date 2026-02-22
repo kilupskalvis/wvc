@@ -26,14 +26,14 @@ import (
 )
 
 func main() {
-	listen := flag.String("listen", envOrDefault("WVC_LISTEN", "0.0.0.0:8720"), "Listen address")
+	listen := flag.String("listen", envOrDefault("WVC_LISTEN", "127.0.0.1:8720"), "Listen address")
 	dataDir := flag.String("data-dir", envOrDefault("WVC_DATA_DIR", "/var/lib/wvc-server"), "Data directory")
-	adminToken := flag.String("admin-token", os.Getenv("WVC_ADMIN_TOKEN"), "Admin API token")
 	logLevel := flag.String("log-level", envOrDefault("WVC_LOG_LEVEL", "info"), "Log level (debug, info, warn, error)")
 	logFormat := flag.String("log-format", envOrDefault("WVC_LOG_FORMAT", "json"), "Log format (json, text)")
 	tlsCert := flag.String("tls-cert", os.Getenv("WVC_TLS_CERT"), "TLS certificate file")
 	tlsKey := flag.String("tls-key", os.Getenv("WVC_TLS_KEY"), "TLS key file")
 	webhookURLs := flag.String("webhook-urls", os.Getenv("WVC_WEBHOOK_URLS"), "Comma-separated webhook URLs to notify on push")
+	webhookSecret := flag.String("webhook-secret", os.Getenv("WVC_WEBHOOK_SECRET"), "HMAC secret for signing webhook payloads")
 	flag.Parse()
 
 	// Setup logger
@@ -85,7 +85,7 @@ func main() {
 
 	// Server config
 	cfg := server.DefaultServerConfig()
-	cfg.AdminToken = *adminToken
+	cfg.AdminToken = os.Getenv("WVC_ADMIN_TOKEN")
 
 	// Webhooks
 	if *webhookURLs != "" {
@@ -98,23 +98,24 @@ func main() {
 			}
 		}
 		if len(trimmed) > 0 {
-			cfg.Webhooks = server.NewWebhookNotifier(&server.WebhookConfig{URLs: trimmed}, logger)
+			cfg.Webhooks = server.NewWebhookNotifier(&server.WebhookConfig{URLs: trimmed, Secret: *webhookSecret}, logger)
 			logger.Info("webhooks configured", "count", len(trimmed))
 		}
 	}
 
 	// Handler
-	h, handlerCleanup := server.Handler(repos, tokens, cfg, logger)
+	h, handlerCleanup := server.Handler(repos, tokens, cfg, logger, repos)
 	defer handlerCleanup()
 
 	// HTTP server
 	srv := &http.Server{
-		Addr:         *listen,
-		Handler:      h,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 5 * time.Minute,
-		IdleTimeout:  120 * time.Second,
-		BaseContext:  func(_ net.Listener) context.Context { return context.Background() },
+		Addr:              *listen,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       120 * time.Second,
+		BaseContext:       func(_ net.Listener) context.Context { return context.Background() },
 	}
 
 	// Graceful shutdown
@@ -165,8 +166,9 @@ type diskRepoOpener struct {
 }
 
 type repoEntry struct {
-	meta  metastore.MetaStore
-	blobs blobstore.BlobStore
+	meta    metastore.MetaStore
+	blobs   blobstore.BlobStore
+	writeMu sync.Mutex // protects against concurrent GC + write operations
 }
 
 func (d *diskRepoOpener) Open(name string) (metastore.MetaStore, blobstore.BlobStore, error) {
@@ -210,6 +212,26 @@ func (d *diskRepoOpener) Open(name string) (metastore.MetaStore, blobstore.BlobS
 	d.logger.Info("opened repository", "name", name)
 
 	return meta, blobs, nil
+}
+
+// LockWrite acquires the per-repo write mutex, preventing concurrent writes and GC.
+func (d *diskRepoOpener) LockWrite(name string) {
+	d.mu.RLock()
+	entry, ok := d.stores[name]
+	d.mu.RUnlock()
+	if ok {
+		entry.writeMu.Lock()
+	}
+}
+
+// UnlockWrite releases the per-repo write mutex.
+func (d *diskRepoOpener) UnlockWrite(name string) {
+	d.mu.RLock()
+	entry, ok := d.stores[name]
+	d.mu.RUnlock()
+	if ok {
+		entry.writeMu.Unlock()
+	}
 }
 
 func (d *diskRepoOpener) CloseAll() {
@@ -305,11 +327,16 @@ func (s *fileTokenStore) CreateToken(desc string, repos []string, permission str
 		Permission: permission,
 	}
 
+	// Persist to disk first, then update in-memory map on success.
 	s.mu.Lock()
 	s.tokens[tokenHash] = info
 	s.mu.Unlock()
 
 	if err := s.Save(); err != nil {
+		// Save failed — remove from in-memory map to stay consistent.
+		s.mu.Lock()
+		delete(s.tokens, tokenHash)
+		s.mu.Unlock()
 		return "", nil, fmt.Errorf("persist token: %w", err)
 	}
 
@@ -329,21 +356,33 @@ func (s *fileTokenStore) ListTokens() ([]*server.TokenInfo, error) {
 
 func (s *fileTokenStore) DeleteToken(id string) error {
 	s.mu.Lock()
-	found := false
+	var foundHash string
+	var foundToken *server.TokenInfo
 	for hash, t := range s.tokens {
 		if t.ID == id {
-			delete(s.tokens, hash)
-			found = true
+			foundHash = hash
+			foundToken = t
 			break
 		}
 	}
-	s.mu.Unlock()
-
-	if !found {
+	if foundHash == "" {
+		s.mu.Unlock()
 		return fmt.Errorf("token '%s' not found", id)
 	}
 
-	return s.Save()
+	// Remove from in-memory map, attempt save, restore on failure.
+	delete(s.tokens, foundHash)
+	s.mu.Unlock()
+
+	if err := s.Save(); err != nil {
+		// Save failed — restore the token in the in-memory map.
+		s.mu.Lock()
+		s.tokens[foundHash] = foundToken
+		s.mu.Unlock()
+		return err
+	}
+
+	return nil
 }
 
 func generateID() string {

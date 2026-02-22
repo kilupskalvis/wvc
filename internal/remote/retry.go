@@ -54,6 +54,9 @@ func isTransient(err error) bool {
 	if errors.As(err, &re) {
 		return re.Status >= 500 || re.Status == http.StatusTooManyRequests
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	return true // network errors are transient
 }
 

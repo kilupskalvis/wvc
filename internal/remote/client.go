@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/kilupskalvis/wvc/internal/models"
 )
@@ -43,11 +46,14 @@ type HTTPClient struct {
 
 // NewHTTPClient creates an HTTP-based remote client.
 func NewHTTPClient(baseURL, repoName, token string) *HTTPClient {
+	if strings.HasPrefix(baseURL, "http://") {
+		fmt.Fprintf(os.Stderr, "warning: sending credentials over unencrypted HTTP connection\n")
+	}
 	return &HTTPClient{
 		baseURL:    baseURL,
 		repoName:   repoName,
 		token:      token,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
@@ -228,7 +234,7 @@ func (c *HTTPClient) DownloadCommitBundle(ctx context.Context, commitID string) 
 			return nil, fmt.Errorf("decompress response: %w", err)
 		}
 		defer gz.Close()
-		reader = gz
+		reader = io.LimitReader(gz, 256*1024*1024) // 256MB decompressed limit
 	}
 
 	var bundle CommitBundle
@@ -303,7 +309,8 @@ func (e *RemoteError) Error() string {
 
 func decodeError(resp *http.Response) error {
 	var errResp ErrorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+	limited := io.LimitReader(resp.Body, 1024*1024) // 1MB limit for error responses
+	if err := json.NewDecoder(limited).Decode(&errResp); err != nil {
 		return &RemoteError{
 			Code:    "unknown",
 			Message: fmt.Sprintf("HTTP %d", resp.StatusCode),

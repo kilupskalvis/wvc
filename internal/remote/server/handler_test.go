@@ -175,15 +175,20 @@ func TestBranches_ListEmpty(t *testing.T) {
 func TestCommitBundle_UploadAndDownload(t *testing.T) {
 	ts, _, _, token := newTestServer(t)
 
+	msg := "test commit"
+	ts0 := time.Now().Truncate(time.Second)
+	ops := []*models.Operation{
+		{Type: models.OperationInsert, ClassName: "Article", ObjectID: "obj-001"},
+	}
+	commitID := models.GenerateCommitID(msg, ts0, "", ops)
+
 	bundle := &remote.CommitBundle{
 		Commit: &models.Commit{
-			ID:        "abc123",
-			Message:   "test commit",
-			Timestamp: time.Now().Truncate(time.Second),
+			ID:        commitID,
+			Message:   msg,
+			Timestamp: ts0,
 		},
-		Operations: []*models.Operation{
-			{Type: models.OperationInsert, ClassName: "Article", ObjectID: "obj-001"},
-		},
+		Operations: ops,
 	}
 
 	// Upload
@@ -194,14 +199,14 @@ func TestCommitBundle_UploadAndDownload(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	// Download
-	req = authReq("GET", ts.URL+"/api/v1/repos/test/commits/abc123/bundle", token, nil)
+	req = authReq("GET", ts.URL+"/api/v1/repos/test/commits/"+commitID+"/bundle", token, nil)
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var result remote.CommitBundle
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
-	assert.Equal(t, "abc123", result.Commit.ID)
+	assert.Equal(t, commitID, result.Commit.ID)
 	assert.Len(t, result.Operations, 1)
 }
 

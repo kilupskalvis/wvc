@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/kilupskalvis/wvc/internal/models"
@@ -75,10 +76,21 @@ func SetRemoteToken(st *store.Store, remoteName, token string) error {
 	return st.SetRemoteToken(remoteName, token)
 }
 
-// GetRemoteToken retrieves the token for a remote. It checks the
-// WVC_REMOTE_TOKEN environment variable first, then falls back to the stored token.
+// sanitizeEnvName replaces non-alphanumeric characters with underscores.
+var nonAlphanumeric = regexp.MustCompile(`[^A-Za-z0-9]`)
+
+// GetRemoteToken retrieves the token for a remote. It checks:
+// 1. Per-remote env var WVC_REMOTE_TOKEN_<UPPER_NAME>
+// 2. Global env var WVC_REMOTE_TOKEN
+// 3. Stored token
 func GetRemoteToken(st *store.Store, remoteName string) (string, error) {
-	// Environment variable takes precedence
+	// Per-remote environment variable takes highest precedence
+	sanitized := nonAlphanumeric.ReplaceAllString(strings.ToUpper(remoteName), "_")
+	if envToken := os.Getenv("WVC_REMOTE_TOKEN_" + sanitized); envToken != "" {
+		return envToken, nil
+	}
+
+	// Global environment variable
 	if envToken := os.Getenv("WVC_REMOTE_TOKEN"); envToken != "" {
 		return envToken, nil
 	}

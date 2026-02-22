@@ -21,7 +21,13 @@ func (s *Store) InsertCommitBundle(bundle *remote.CommitBundle) error {
 
 	return s.db.Update(func(tx *bolt.Tx) error {
 		commitBucket := tx.Bucket(bucketCommits)
+		if commitBucket == nil {
+			return fmt.Errorf("commits bucket not found (database not initialized?)")
+		}
 		opBucket := tx.Bucket(bucketOperations)
+		if opBucket == nil {
+			return fmt.Errorf("operations bucket not found (database not initialized?)")
+		}
 
 		// Idempotent: skip if commit already exists
 		if commitBucket.Get([]byte(bundle.Commit.ID)) != nil {

@@ -143,6 +143,11 @@ func (s *Store) ClearStagedChanges() error {
 			return fmt.Errorf("failed to reset staged count: %w", err)
 		}
 
+		// Recreate the bucket
+		if _, err := tx.CreateBucketIfNotExists(bucketStagedChanges); err != nil {
+			return fmt.Errorf("recreate staged changes bucket: %w", err)
+		}
+
 		return nil
 	})
 }

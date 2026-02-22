@@ -1,16 +1,17 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 
 	"github.com/fatih/color"
 	"github.com/kilupskalvis/wvc/internal/core"
 	"github.com/kilupskalvis/wvc/internal/remote"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var remoteCmd = &cobra.Command{
@@ -167,13 +168,13 @@ func runRemoteSetToken(cmd *cobra.Command, args []string) {
 
 	fmt.Fprintf(os.Stderr, "Enter token for remote '%s': ", name)
 
-	reader := bufio.NewReader(os.Stdin)
-	token, err := reader.ReadString('\n')
+	tokenBytes, err := term.ReadPassword(int(syscall.Stdin))
 	if err != nil {
-		exitError("failed to read token: %v", err)
+		exitError("read token: %v", err)
 	}
+	fmt.Println() // newline since ReadPassword doesn't echo
 
-	token = strings.TrimSpace(token)
+	token := strings.TrimSpace(string(tokenBytes))
 	if token == "" {
 		exitError("token cannot be empty")
 	}

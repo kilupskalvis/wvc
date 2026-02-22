@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/kilupskalvis/wvc/internal/models"
 	bolt "go.etcd.io/bbolt"
@@ -50,7 +51,11 @@ func (s *Store) GetCommitByShortID(shortID string) (*models.Commit, error) {
 	var commit models.Commit
 	var found bool
 	err := s.db.View(func(tx *bolt.Tx) error {
-		c := tx.Bucket(bucketCommits).Cursor()
+		b := tx.Bucket(bucketCommits)
+		if b == nil {
+			return fmt.Errorf("commits bucket not found (database not initialized?)")
+		}
+		c := b.Cursor()
 		prefix := []byte(shortID)
 		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
 			if found {
@@ -88,6 +93,9 @@ func (s *Store) GetCommitLog(limit int) ([]*models.Commit, error) {
 	var commits []*models.Commit
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketCommits)
+		if b == nil {
+			return fmt.Errorf("commits bucket not found (database not initialized?)")
+		}
 		return b.ForEach(func(k, v []byte) error {
 			var c models.Commit
 			if err := json.Unmarshal(v, &c); err != nil {
@@ -160,6 +168,120 @@ func (s *Store) GetAllAncestors(commitID string) (map[string]bool, error) {
 	})
 
 	return ancestors, err
+}
+
+// FinalizeCommit atomically performs the entire commit workflow in a single bbolt
+// transaction: re-keys uncommitted operations under the commit ID, stores the commit,
+// sets HEAD, and updates (or creates) the branch pointer. This prevents partial state
+// if the process crashes mid-commit.
+func (s *Store) FinalizeCommit(commit *models.Commit, branchName string, branchExists bool) (int64, error) {
+	var count int64
+	commitData, err := json.Marshal(commit)
+	if err != nil {
+		return 0, fmt.Errorf("marshal commit: %w", err)
+	}
+
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		opBucket := tx.Bucket(bucketOperations)
+		if opBucket == nil {
+			return fmt.Errorf("operations bucket not found (database not initialized?)")
+		}
+		commitBucket := tx.Bucket(bucketCommits)
+		if commitBucket == nil {
+			return fmt.Errorf("commits bucket not found (database not initialized?)")
+		}
+		kvBucket := tx.Bucket(bucketKV)
+		if kvBucket == nil {
+			return fmt.Errorf("kv bucket not found (database not initialized?)")
+		}
+
+		// 1. Mark uncommitted operations as committed under this commit ID
+		var keys [][]byte
+		c := opBucket.Cursor()
+		prefix := []byte(uncommittedPrefix)
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+			keyCopy := make([]byte, len(k))
+			copy(keyCopy, k)
+			keys = append(keys, keyCopy)
+		}
+
+		for seq, oldKey := range keys {
+			v := opBucket.Get(oldKey)
+			if v == nil {
+				continue
+			}
+			var op models.Operation
+			if err := json.Unmarshal(v, &op); err != nil {
+				return fmt.Errorf("unmarshal operation: %w", err)
+			}
+			op.CommitID = commit.ID
+			op.Seq = seq
+			newData, err := json.Marshal(&op)
+			if err != nil {
+				return fmt.Errorf("marshal operation: %w", err)
+			}
+			if err := opBucket.Put(operationKey(commit.ID, seq), newData); err != nil {
+				return err
+			}
+			if err := opBucket.Delete(oldKey); err != nil {
+				return err
+			}
+			count++
+		}
+
+		// 2. Store commit
+		if err := commitBucket.Put([]byte(commit.ID), commitData); err != nil {
+			return fmt.Errorf("store commit: %w", err)
+		}
+
+		// 3. Set HEAD
+		if err := kvBucket.Put([]byte("HEAD"), []byte(commit.ID)); err != nil {
+			return fmt.Errorf("set HEAD: %w", err)
+		}
+
+		// 4. Update or create branch
+		if branchName != "" {
+			branchBucket := tx.Bucket(bucketBranches)
+			if branchBucket == nil {
+				return fmt.Errorf("branches bucket not found (database not initialized?)")
+			}
+
+			if branchExists {
+				data := branchBucket.Get([]byte(branchName))
+				if data == nil {
+					return fmt.Errorf("branch not found: %s", branchName)
+				}
+				var branch models.Branch
+				if err := json.Unmarshal(data, &branch); err != nil {
+					return fmt.Errorf("unmarshal branch: %w", err)
+				}
+				branch.CommitID = commit.ID
+				updatedData, err := json.Marshal(branch)
+				if err != nil {
+					return fmt.Errorf("marshal branch: %w", err)
+				}
+				if err := branchBucket.Put([]byte(branchName), updatedData); err != nil {
+					return err
+				}
+			} else {
+				branch := &models.Branch{
+					Name:      branchName,
+					CommitID:  commit.ID,
+					CreatedAt: time.Now(),
+				}
+				branchData, err := json.Marshal(branch)
+				if err != nil {
+					return fmt.Errorf("marshal branch: %w", err)
+				}
+				if err := branchBucket.Put([]byte(branchName), branchData); err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
+	})
+	return count, err
 }
 
 // HasCommit checks whether a commit exists.

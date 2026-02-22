@@ -133,7 +133,9 @@ func (s *Store) RemoveRemote(name string) error {
 		kvBucket := tx.Bucket(bucketKV)
 		if kvBucket != nil {
 			tokenKey := remoteTokenKey(name)
-			kvBucket.Delete([]byte(tokenKey))
+			if err := kvBucket.Delete([]byte(tokenKey)); err != nil {
+				return fmt.Errorf("delete remote token: %w", err)
+			}
 		}
 
 		return nil
@@ -207,7 +209,7 @@ func (s *Store) DeleteRemoteToken(remoteName string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		kvBucket := tx.Bucket(bucketKV)
 		if kvBucket == nil {
-			return nil
+			return fmt.Errorf("kv bucket not found (database not initialized?)")
 		}
 		return kvBucket.Delete([]byte(remoteTokenKey(remoteName)))
 	})
@@ -299,7 +301,7 @@ func (s *Store) DeleteRemoteBranch(remoteName, branchName string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketRemoteBranch)
 		if bucket == nil {
-			return nil
+			return fmt.Errorf("remote_branches bucket not found (database not initialized?)")
 		}
 
 		key := models.RemoteBranchKey(remoteName, branchName)

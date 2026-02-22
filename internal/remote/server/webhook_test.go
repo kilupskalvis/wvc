@@ -46,7 +46,7 @@ func TestWebhookNotifier_NotifyPush(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	wn := NewWebhookNotifier(&WebhookConfig{URLs: []string{ts.URL}}, slog.Default())
+	wn := NewWebhookNotifier(&WebhookConfig{URLs: []string{ts.URL}, AllowPrivate: true}, slog.Default())
 	require.NotNil(t, wn)
 
 	wn.NotifyPush("myrepo", "main", "commit123")
@@ -84,7 +84,7 @@ func TestWebhookNotifier_NotifyPush_MultipleURLs(t *testing.T) {
 	}))
 	defer ts2.Close()
 
-	wn := NewWebhookNotifier(&WebhookConfig{URLs: []string{ts1.URL, ts2.URL}}, slog.Default())
+	wn := NewWebhookNotifier(&WebhookConfig{URLs: []string{ts1.URL, ts2.URL}, AllowPrivate: true}, slog.Default())
 	require.NotNil(t, wn)
 
 	wn.NotifyPush("repo", "main", "abc")
@@ -105,7 +105,7 @@ func TestWebhookNotifier_Post_4xxNoRetry(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	wn := NewWebhookNotifier(&WebhookConfig{URLs: []string{ts.URL}}, slog.Default())
+	wn := NewWebhookNotifier(&WebhookConfig{URLs: []string{ts.URL}, AllowPrivate: true}, slog.Default())
 	require.NotNil(t, wn)
 
 	err := wn.post(ts.URL, []byte(`{}`))

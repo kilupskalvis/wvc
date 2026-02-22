@@ -87,7 +87,7 @@ func RevertCommitWithWarnings(ctx context.Context, cfg *config.Config, st *store
 	if err != nil {
 		return nil, err
 	}
-	revertCommitID := generateCommitID(revertMessage, now, commit.ID, uncommittedOps)
+	revertCommitID := models.GenerateCommitID(revertMessage, now, commit.ID, uncommittedOps)
 
 	// Capture current schema state for the revert commit
 	if err := captureSchemaSnapshot(ctx, st, client, revertCommitID); err != nil {
@@ -103,24 +103,15 @@ func RevertCommitWithWarnings(ctx context.Context, cfg *config.Config, st *store
 		OperationCount: len(operations),
 	}
 
-	// Mark operations as committed
-	if _, err := st.MarkOperationsCommitted(revertCommitID); err != nil {
-		return nil, err
+	// Atomically: mark operations committed, create commit, set HEAD, update branch
+	branchName, _ := st.GetCurrentBranch()
+	branchExists := false
+	if branchName != "" {
+		existing, _ := st.GetBranch(branchName)
+		branchExists = existing != nil
 	}
-
-	// Save revert commit
-	if err := st.CreateCommit(revertCommit); err != nil {
-		return nil, err
-	}
-
-	// Update HEAD
-	if err := st.SetHEAD(revertCommitID); err != nil {
-		return nil, err
-	}
-
-	// Update branch pointer if on a branch
-	if branch, _ := st.GetCurrentBranch(); branch != "" {
-		_ = st.UpdateBranch(branch, revertCommitID)
+	if _, err := st.FinalizeCommit(revertCommit, branchName, branchExists); err != nil {
+		return nil, fmt.Errorf("finalize revert commit: %w", err)
 	}
 
 	// Update known state

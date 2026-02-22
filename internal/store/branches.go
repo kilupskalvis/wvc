@@ -175,6 +175,68 @@ func (s *Store) SetCurrentBranch(name string) error {
 	})
 }
 
+// UpdateBranchAndHEAD atomically updates a branch pointer and HEAD in a single transaction.
+func (s *Store) UpdateBranchAndHEAD(branchName, commitID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		// Update branch
+		branchBucket := tx.Bucket(bucketBranches)
+		if branchBucket == nil {
+			return fmt.Errorf("branches bucket not found (database not initialized?)")
+		}
+		data := branchBucket.Get([]byte(branchName))
+		if data == nil {
+			return fmt.Errorf("branch not found: %s", branchName)
+		}
+		var branch models.Branch
+		if err := json.Unmarshal(data, &branch); err != nil {
+			return fmt.Errorf("unmarshal branch: %w", err)
+		}
+		branch.CommitID = commitID
+		updatedData, err := json.Marshal(branch)
+		if err != nil {
+			return fmt.Errorf("marshal branch: %w", err)
+		}
+		if err := branchBucket.Put([]byte(branchName), updatedData); err != nil {
+			return err
+		}
+
+		// Update HEAD
+		kvBucket := tx.Bucket(bucketKV)
+		if kvBucket == nil {
+			return fmt.Errorf("kv bucket not found (database not initialized?)")
+		}
+		return kvBucket.Put([]byte("HEAD"), []byte(commitID))
+	})
+}
+
+// CreateBranchAndHEAD atomically creates a branch and sets HEAD in a single transaction.
+func (s *Store) CreateBranchAndHEAD(branchName, commitID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		branchBucket := tx.Bucket(bucketBranches)
+		if branchBucket == nil {
+			return fmt.Errorf("branches bucket not found (database not initialized?)")
+		}
+		branch := &models.Branch{
+			Name:      branchName,
+			CommitID:  commitID,
+			CreatedAt: time.Now(),
+		}
+		branchData, err := json.Marshal(branch)
+		if err != nil {
+			return fmt.Errorf("marshal branch: %w", err)
+		}
+		if err := branchBucket.Put([]byte(branchName), branchData); err != nil {
+			return err
+		}
+
+		kvBucket := tx.Bucket(bucketKV)
+		if kvBucket == nil {
+			return fmt.Errorf("kv bucket not found (database not initialized?)")
+		}
+		return kvBucket.Put([]byte("HEAD"), []byte(commitID))
+	})
+}
+
 // BranchExists checks if a branch with the given name exists.
 func (s *Store) BranchExists(name string) (bool, error) {
 	var exists bool

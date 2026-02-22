@@ -52,9 +52,9 @@ func New(dbPath string) (*Store, error) {
 		}
 	}
 
-	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: 1 * time.Second})
+	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("open database %s (is another wvc process running?): %w", dbPath, err)
 	}
 
 	return &Store{db: db}, nil
@@ -94,6 +94,14 @@ func (s *Store) Initialize() error {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
 		}
+
+		kvBucket := tx.Bucket(bucketKV)
+		if kvBucket.Get([]byte("schema_version")) == nil {
+			if err := kvBucket.Put([]byte("schema_version"), []byte("1")); err != nil {
+				return fmt.Errorf("set schema version: %w", err)
+			}
+		}
+
 		return nil
 	})
 }
@@ -126,7 +134,19 @@ func (s *Store) SetValue(key, value string) error {
 	})
 }
 
-// RunMigrations is a no-op for bbolt — schema is implicit in bucket structure.
+// RunMigrations checks the schema version and applies any needed migrations.
 func (s *Store) RunMigrations() error {
-	return nil
+	return s.db.Update(func(tx *bolt.Tx) error {
+		kvBucket := tx.Bucket(bucketKV)
+		if kvBucket == nil {
+			return nil // not initialized yet
+		}
+		versionBytes := kvBucket.Get([]byte("schema_version"))
+		if versionBytes == nil {
+			// Pre-migration database, set to version 1
+			return kvBucket.Put([]byte("schema_version"), []byte("1"))
+		}
+		// Current version is 1, no migrations needed yet
+		return nil
+	})
 }

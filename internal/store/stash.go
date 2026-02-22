@@ -242,6 +242,9 @@ func (s *Store) DeleteStash(stashID int64) error {
 
 		// Delete stash
 		key := []byte(fmt.Sprintf("%08d", stashID))
+		if stashBucket.Get(key) == nil {
+			return fmt.Errorf("stash %d not found", stashID)
+		}
 		if err := stashBucket.Delete(key); err != nil {
 			return fmt.Errorf("failed to delete stash: %w", err)
 		}

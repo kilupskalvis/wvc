@@ -135,6 +135,9 @@ func Push(ctx context.Context, st *store.Store, client remote.RemoteClient, opts
 
 	// Update branch pointer (CAS)
 	expectedTip := negotiation.RemoteTip
+	if opts.Force {
+		expectedTip = ""
+	}
 	if negotiation.RemoteTip != "" && !opts.Force {
 		remoteIsAncestor := false
 		for _, id := range commitIDs {

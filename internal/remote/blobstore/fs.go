@@ -79,10 +79,16 @@ func (s *FSStore) Put(_ context.Context, hash string, r io.Reader, dims int) err
 		return fmt.Errorf("invalid blob hash: %q", hash)
 	}
 	blobPath := s.blobPath(hash)
+	metaPath := s.metaPath(hash)
 
-	// Check if already exists
+	// Check if already exists — only skip if BOTH blob and meta exist
+	blobExists := false
 	if _, err := os.Stat(blobPath); err == nil {
-		return nil // idempotent
+		if _, err := os.Stat(metaPath); err == nil {
+			return nil // both exist, idempotent
+		}
+		// blob exists but meta is missing — fall through to write meta
+		blobExists = true
 	}
 
 	// Create directory
@@ -91,45 +97,62 @@ func (s *FSStore) Put(_ context.Context, hash string, r io.Reader, dims int) err
 		return fmt.Errorf("create blob dir: %w", err)
 	}
 
-	// Write to temp file, verify hash, rename
-	tmpFile, err := os.CreateTemp(dir, ".blob-*")
+	// If blob doesn't exist yet, write it
+	if !blobExists {
+		// Write to temp file, verify hash, rename
+		tmpFile, err := os.CreateTemp(dir, ".blob-*")
+		if err != nil {
+			return fmt.Errorf("create temp file: %w", err)
+		}
+		tmpPath := tmpFile.Name()
+
+		// Hash data as we write
+		hasher := sha256.New()
+		writer := io.MultiWriter(tmpFile, hasher)
+
+		if _, err := io.Copy(writer, r); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("write blob data: %w", err)
+		}
+
+		if err := tmpFile.Close(); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("close temp file: %w", err)
+		}
+
+		// Verify hash
+		computedHash := hex.EncodeToString(hasher.Sum(nil))
+		if computedHash != hash {
+			os.Remove(tmpPath)
+			return fmt.Errorf("expected %s, got %s: %w", hash, computedHash, ErrHashMismatch)
+		}
+
+		// Atomic rename
+		if err := os.Rename(tmpPath, blobPath); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("rename blob: %w", err)
+		}
+	}
+
+	// Write meta to temp file first, then atomic rename
+	tmpMeta, err := os.CreateTemp(filepath.Dir(metaPath), ".meta-*")
 	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+		return fmt.Errorf("create temp meta: %w", err)
 	}
-	tmpPath := tmpFile.Name()
-
-	// Hash data as we write
-	hasher := sha256.New()
-	writer := io.MultiWriter(tmpFile, hasher)
-
-	if _, err := io.Copy(writer, r); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("write blob data: %w", err)
+	tmpMetaPath := tmpMeta.Name()
+	if _, err := tmpMeta.Write([]byte(strconv.Itoa(dims))); err != nil {
+		tmpMeta.Close()
+		os.Remove(tmpMetaPath)
+		return fmt.Errorf("write temp meta: %w", err)
 	}
-
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("close temp file: %w", err)
+	if err := tmpMeta.Close(); err != nil {
+		os.Remove(tmpMetaPath)
+		return fmt.Errorf("close temp meta: %w", err)
 	}
-
-	// Verify hash
-	computedHash := hex.EncodeToString(hasher.Sum(nil))
-	if computedHash != hash {
-		os.Remove(tmpPath)
-		return fmt.Errorf("expected %s, got %s: %w", hash, computedHash, ErrHashMismatch)
-	}
-
-	// Atomic rename
-	if err := os.Rename(tmpPath, blobPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename blob: %w", err)
-	}
-
-	// Write meta file with dimensions
-	metaPath := s.metaPath(hash)
-	if err := os.WriteFile(metaPath, []byte(strconv.Itoa(dims)), 0644); err != nil {
-		return fmt.Errorf("write blob meta: %w", err)
+	if err := os.Rename(tmpMetaPath, metaPath); err != nil {
+		os.Remove(tmpMetaPath)
+		return fmt.Errorf("rename meta: %w", err)
 	}
 
 	return nil

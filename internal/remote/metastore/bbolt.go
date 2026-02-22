@@ -121,7 +121,7 @@ func (s *BboltStore) InsertCommitBundle(_ context.Context, b *remote.CommitBundl
 			if err != nil {
 				return fmt.Errorf("marshal operation: %w", err)
 			}
-			key := fmt.Sprintf("%s:%04d", b.Commit.ID, i)
+			key := fmt.Sprintf("%s:%08d", b.Commit.ID, i)
 			if err := opBucket.Put([]byte(key), opData); err != nil {
 				return fmt.Errorf("store operation: %w", err)
 			}
@@ -340,7 +340,7 @@ func (s *BboltStore) UpdateBranchCAS(_ context.Context, name, newCommitID, expec
 			return fmt.Errorf("unmarshal branch: %w", err)
 		}
 
-		if branch.CommitID != expectedCommitID {
+		if expectedCommitID != "" && branch.CommitID != expectedCommitID {
 			return ErrConflict
 		}
 

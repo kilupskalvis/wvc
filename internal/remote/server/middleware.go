@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -76,14 +77,17 @@ func loggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 func recoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rw := &responseWriter{ResponseWriter: w, statusCode: 0}
 			defer func() {
 				if rec := recover(); rec != nil {
 					reqID, _ := r.Context().Value(contextKeyRequestID).(string)
 					logger.Error("panic recovered", "error", rec, "request_id", reqID)
-					http.Error(w, `{"error":"internal_error","message":"internal server error"}`, http.StatusInternalServerError)
+					if rw.statusCode == 0 {
+						http.Error(rw, `{"error":"internal_error","message":"internal server error"}`, http.StatusInternalServerError)
+					}
 				}
 			}()
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(rw, r)
 		})
 	}
 }
@@ -91,6 +95,7 @@ func recoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 // authMiddleware validates bearer tokens and sets permissions in context.
 func authMiddleware(tokens TokenStore, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
+		sem := make(chan struct{}, 20)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
 			if !strings.HasPrefix(auth, "Bearer ") {
@@ -114,11 +119,17 @@ func authMiddleware(tokens TokenStore, logger *slog.Logger) func(http.Handler) h
 			}
 
 			// Async update last_used_at
-			go func() {
-				if err := tokens.UpdateLastUsed(info.ID); err != nil {
-					logger.Warn("failed to update token last_used_at", "error", err, "token_id", info.ID)
-				}
-			}()
+			select {
+			case sem <- struct{}{}:
+				go func() {
+					defer func() { <-sem }()
+					if err := tokens.UpdateLastUsed(info.ID); err != nil {
+						logger.Warn("failed to update token last_used_at", "error", err, "token_id", info.ID)
+					}
+				}()
+			default:
+				// Drop update if too many in flight
+			}
 
 			ctx := r.Context()
 			ctx = context.WithValue(ctx, contextKeyTokenID, info.ID)
@@ -232,18 +243,21 @@ func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		tokenID, _ := r.Context().Value(contextKeyTokenID).(string)
-		if tokenID == "" {
-			next.ServeHTTP(w, r)
-			return
+		key, _ := r.Context().Value(contextKeyTokenID).(string)
+		if key == "" {
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				host = r.RemoteAddr
+			}
+			key = host
 		}
 
 		rl.mu.Lock()
-		win, ok := rl.windows[tokenID]
+		win, ok := rl.windows[key]
 		now := time.Now()
 		if !ok || now.After(win.resetAt) {
 			win = &window{count: 0, resetAt: now.Add(time.Minute)}
-			rl.windows[tokenID] = win
+			rl.windows[key] = win
 		}
 		win.count++
 		count := win.count
@@ -271,6 +285,16 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
 }
 
 // HashToken returns the SHA256 hex digest of a raw token string.

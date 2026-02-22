@@ -12,6 +12,7 @@ require (
 	github.com/weaviate/weaviate-go-client/v5 v5.6.0
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/sync v0.19.0
+	golang.org/x/term v0.36.0
 )
 
 require (

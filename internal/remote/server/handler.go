@@ -2,6 +2,7 @@ package server
 
 import (
 	"compress/gzip"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kilupskalvis/wvc/internal/models"
 	"github.com/kilupskalvis/wvc/internal/remote"
 	"github.com/kilupskalvis/wvc/internal/remote/blobstore"
 	"github.com/kilupskalvis/wvc/internal/remote/metastore"
@@ -21,6 +23,20 @@ import (
 type RepoOpener interface {
 	Open(name string) (metastore.MetaStore, blobstore.BlobStore, error)
 }
+
+// RepoLocker provides per-repo mutual exclusion between write operations and GC.
+// Write handlers and GC acquire the lock to prevent the race condition where GC
+// deletes a blob that was just referenced by a concurrent push.
+type RepoLocker interface {
+	LockWrite(repo string)
+	UnlockWrite(repo string)
+}
+
+// noopRepoLocker is a no-op implementation for when no locking is needed.
+type noopRepoLocker struct{}
+
+func (noopRepoLocker) LockWrite(string)   {}
+func (noopRepoLocker) UnlockWrite(string) {}
 
 // ServerConfig holds configurable limits for the server.
 type ServerConfig struct {
@@ -42,8 +58,14 @@ func DefaultServerConfig() *ServerConfig {
 
 // Handler creates the HTTP handler with all routes and middleware.
 // The returned cleanup function stops background goroutines and should be
-// called on server shutdown.
-func Handler(repos RepoOpener, tokens TokenStore, cfg *ServerConfig, logger *slog.Logger) (http.Handler, func()) {
+// called on server shutdown. If locker is nil, a no-op locker is used.
+func Handler(repos RepoOpener, tokens TokenStore, cfg *ServerConfig, logger *slog.Logger, locker ...RepoLocker) (http.Handler, func()) {
+	var repoLocker RepoLocker
+	if len(locker) > 0 && locker[0] != nil {
+		repoLocker = locker[0]
+	} else {
+		repoLocker = noopRepoLocker{}
+	}
 	if cfg == nil {
 		cfg = DefaultServerConfig()
 	}
@@ -54,15 +76,28 @@ func Handler(repos RepoOpener, tokens TokenStore, cfg *ServerConfig, logger *slo
 	rl := newRateLimiter(cfg.RequestsPerMinute)
 	auth := authMiddleware(tokens, logger)
 
+	// repoWriteLockMW acquires a per-repo write lock for the duration of the request.
+	// This prevents concurrent write operations from racing with GC.
+	repoWriteLockMW := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			repo := r.PathValue("repo")
+			if repo != "" {
+				repoLocker.LockWrite(repo)
+				defer repoLocker.UnlockWrite(repo)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
 	// Wrap a handler with auth + repo check + rate limit.
 	// applyMiddleware reverses the list, so the last item runs outermost (first).
 	// Execution order: auth -> requireRepo -> rl -> handler
 	withAuth := func(h http.HandlerFunc) http.Handler {
 		return applyMiddleware(h, auth, requireRepo, rl.middleware)
 	}
-	// Execution order: auth -> requireRepo -> requireWrite -> rl -> handler
+	// Execution order: auth -> requireRepo -> requireWrite -> repoWriteLock -> rl -> handler
 	withAuthWrite := func(h http.HandlerFunc) http.Handler {
-		return applyMiddleware(h, auth, requireRepo, requireWrite, rl.middleware)
+		return applyMiddleware(h, auth, requireRepo, requireWrite, repoWriteLockMW, rl.middleware)
 	}
 
 	mux := http.NewServeMux()
@@ -87,7 +122,7 @@ func Handler(repos RepoOpener, tokens TokenStore, cfg *ServerConfig, logger *slo
 		adminMux.HandleFunc("GET /admin/tokens", makeAdminListTokensHandler(tokens, logger))
 		adminMux.HandleFunc("POST /admin/repos", handleNotImplemented)
 		adminMux.HandleFunc("DELETE /admin/repos/{name}", handleNotImplemented)
-		adminMux.HandleFunc("POST /admin/repos/{repo}/gc", makeAdminGCHandler(repos, logger))
+		adminMux.HandleFunc("POST /admin/repos/{repo}/gc", makeAdminGCHandler(repos, repoLocker, logger))
 		mux.Handle("/admin/", adminAuth(cfg.AdminToken, adminMux))
 	}
 
@@ -165,7 +200,7 @@ func makeRepoHandler(repos RepoOpener, cfg *ServerConfig, fn repoHandlerFunc) ht
 
 func handleNegotiatePush(w http.ResponseWriter, r *http.Request, meta metastore.MetaStore, _ blobstore.BlobStore, cfg *ServerConfig) {
 	var req remote.NegotiatePushRequest
-	if err := readJSON(r, cfg.MaxRequestBody, &req); err != nil {
+	if err := readJSON(w, r, cfg.MaxRequestBody, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": err.Error()})
 		return
 	}
@@ -179,7 +214,7 @@ func handleNegotiatePush(w http.ResponseWriter, r *http.Request, meta metastore.
 	var remoteTip string
 	branch, err := meta.GetBranch(r.Context(), req.Branch)
 	if err != nil && !errors.Is(err, metastore.ErrNotFound) {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "get branch", err)
 		return
 	}
 	if branch != nil {
@@ -187,11 +222,17 @@ func handleNegotiatePush(w http.ResponseWriter, r *http.Request, meta metastore.
 	}
 
 	// Find missing commits
+	const maxNegotiateItems = 10000
+	if len(req.Commits) > maxNegotiateItems {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": "too many commits in request"})
+		return
+	}
+
 	var missing []string
 	for _, commitID := range req.Commits {
 		has, err := meta.HasCommit(r.Context(), commitID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+			internalError(w, "has commit", err)
 			return
 		}
 		if !has {
@@ -206,10 +247,16 @@ func handleNegotiatePush(w http.ResponseWriter, r *http.Request, meta metastore.
 }
 
 func handleNegotiatePull(w http.ResponseWriter, r *http.Request, meta metastore.MetaStore, _ blobstore.BlobStore, cfg *ServerConfig) {
+	const maxNegotiateDepth = 10000
+
 	var req remote.NegotiatePullRequest
-	if err := readJSON(r, cfg.MaxRequestBody, &req); err != nil {
+	if err := readJSON(w, r, cfg.MaxRequestBody, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": err.Error()})
 		return
+	}
+
+	if req.Depth <= 0 || req.Depth > maxNegotiateDepth {
+		req.Depth = maxNegotiateDepth
 	}
 
 	if req.Branch == "" {
@@ -223,7 +270,7 @@ func handleNegotiatePull(w http.ResponseWriter, r *http.Request, meta metastore.
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "branch not found"})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "get branch", err)
 		return
 	}
 
@@ -286,8 +333,13 @@ func handleNegotiatePull(w http.ResponseWriter, r *http.Request, meta metastore.
 
 func handleVectorsHave(w http.ResponseWriter, r *http.Request, _ metastore.MetaStore, blobs blobstore.BlobStore, cfg *ServerConfig) {
 	var req remote.VectorCheckRequest
-	if err := readJSON(r, cfg.MaxRequestBody, &req); err != nil {
+	if err := readJSON(w, r, cfg.MaxRequestBody, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": err.Error()})
+		return
+	}
+
+	if len(req.Hashes) > 10000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": "too many hashes in request"})
 		return
 	}
 
@@ -295,7 +347,7 @@ func handleVectorsHave(w http.ResponseWriter, r *http.Request, _ metastore.MetaS
 	for _, hash := range req.Hashes {
 		exists, err := blobs.Has(r.Context(), hash)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+			internalError(w, "check vector existence", err)
 			return
 		}
 		if exists {
@@ -326,7 +378,7 @@ func handleGetCommitBundle(w http.ResponseWriter, r *http.Request, meta metastor
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "commit not found"})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "get commit bundle", err)
 		return
 	}
 
@@ -351,6 +403,9 @@ func handleGetCommitBundle(w http.ResponseWriter, r *http.Request, meta metastor
 func handlePostCommitBundle(w http.ResponseWriter, r *http.Request, meta metastore.MetaStore, _ blobstore.BlobStore, cfg *ServerConfig) {
 	var bundle remote.CommitBundle
 
+	// Limit compressed request body size
+	r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxRequestBody)
+
 	// Handle gzip'd body
 	body := io.Reader(r.Body)
 	if r.Header.Get("Content-Encoding") == "gzip" {
@@ -374,11 +429,25 @@ func handlePostCommitBundle(w http.ResponseWriter, r *http.Request, meta metasto
 		return
 	}
 
+	var expectedID string
+	if bundle.Commit.MergeParentID != "" {
+		expectedID = models.GenerateMergeCommitID(bundle.Commit.Message, bundle.Commit.Timestamp, bundle.Commit.ParentID, bundle.Commit.MergeParentID, bundle.Operations)
+	} else {
+		expectedID = models.GenerateCommitID(bundle.Commit.Message, bundle.Commit.Timestamp, bundle.Commit.ParentID, bundle.Operations)
+	}
+	if bundle.Commit.ID != expectedID {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error":   "commit_id_mismatch",
+			"message": fmt.Sprintf("commit ID does not match content: expected %s, got %s", expectedID, bundle.Commit.ID),
+		})
+		return
+	}
+
 	// Validate parent exists (unless initial commit)
 	if bundle.Commit.ParentID != "" {
 		has, err := meta.HasCommit(r.Context(), bundle.Commit.ParentID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+			internalError(w, "has commit", err)
 			return
 		}
 		if !has {
@@ -394,7 +463,7 @@ func handlePostCommitBundle(w http.ResponseWriter, r *http.Request, meta metasto
 	if bundle.Commit.MergeParentID != "" {
 		has, err := meta.HasCommit(r.Context(), bundle.Commit.MergeParentID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+			internalError(w, "has merge parent commit", err)
 			return
 		}
 		if !has {
@@ -407,7 +476,7 @@ func handlePostCommitBundle(w http.ResponseWriter, r *http.Request, meta metasto
 	}
 
 	if err := meta.InsertCommitBundle(r.Context(), &bundle); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "insert commit bundle", err)
 		return
 	}
 
@@ -429,7 +498,7 @@ func handleGetVector(w http.ResponseWriter, r *http.Request, _ metastore.MetaSto
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "vector not found"})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "get vector", err)
 		return
 	}
 	defer reader.Close()
@@ -457,6 +526,10 @@ func handlePostVector(w http.ResponseWriter, r *http.Request, _ metastore.MetaSt
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": "invalid X-WVC-Dimensions value"})
 		return
 	}
+	if dims <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": "dimensions must be positive"})
+		return
+	}
 
 	limited := io.LimitReader(r.Body, cfg.MaxBlobSize)
 	if err := blobs.Put(r.Context(), hash, limited, dims); err != nil {
@@ -464,7 +537,7 @@ func handlePostVector(w http.ResponseWriter, r *http.Request, _ metastore.MetaSt
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "hash_mismatch", "message": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "put vector", err)
 		return
 	}
 
@@ -476,7 +549,7 @@ func handlePostVector(w http.ResponseWriter, r *http.Request, _ metastore.MetaSt
 func handleListBranches(w http.ResponseWriter, r *http.Request, meta metastore.MetaStore, _ blobstore.BlobStore, _ *ServerConfig) {
 	branches, err := meta.ListBranches(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "list branches", err)
 		return
 	}
 
@@ -491,7 +564,7 @@ func handleGetBranch(w http.ResponseWriter, r *http.Request, meta metastore.Meta
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "branch not found"})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "get branch", err)
 		return
 	}
 
@@ -502,7 +575,7 @@ func handleUpdateBranch(w http.ResponseWriter, r *http.Request, meta metastore.M
 	name := r.PathValue("name")
 
 	var req remote.BranchUpdateRequest
-	if err := readJSON(r, cfg.MaxRequestBody, &req); err != nil {
+	if err := readJSON(w, r, cfg.MaxRequestBody, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_request", "message": err.Error()})
 		return
 	}
@@ -527,7 +600,7 @@ func handleUpdateBranch(w http.ResponseWriter, r *http.Request, meta metastore.M
 			})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "update branch", err)
 		return
 	}
 
@@ -549,7 +622,7 @@ func handleDeleteBranch(w http.ResponseWriter, r *http.Request, meta metastore.M
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "branch not found"})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "delete branch", err)
 		return
 	}
 
@@ -561,19 +634,19 @@ func handleDeleteBranch(w http.ResponseWriter, r *http.Request, meta metastore.M
 func handleRepoInfo(w http.ResponseWriter, r *http.Request, meta metastore.MetaStore, blobs blobstore.BlobStore, _ *ServerConfig) {
 	branches, err := meta.ListBranches(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "list branches", err)
 		return
 	}
 
 	commitCount, err := meta.GetCommitCount(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "get commit count", err)
 		return
 	}
 
 	blobCount, err := blobs.TotalCount(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+		internalError(w, "get blob count", err)
 		return
 	}
 
@@ -598,10 +671,10 @@ func handleNotImplemented(w http.ResponseWriter, _ *http.Request) {
 // --- Admin Auth ---
 
 func adminAuth(adminToken string, next http.Handler) http.Handler {
-	expected := "Bearer " + adminToken
+	expectedHash := sha256.Sum256([]byte("Bearer " + adminToken))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
+		authHash := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if subtle.ConstantTimeCompare(expectedHash[:], authHash[:]) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "auth_failed", "message": "invalid admin token"})
 			return
 		}
@@ -611,15 +684,23 @@ func adminAuth(adminToken string, next http.Handler) http.Handler {
 
 // --- Helpers ---
 
+func internalError(w http.ResponseWriter, context string, err error) {
+	slog.Error(context, "error", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{
+		"error":   "internal_error",
+		"message": "an internal error occurred",
+	})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
 
-func readJSON(r *http.Request, maxSize int64, v interface{}) error {
-	limited := io.LimitReader(r.Body, maxSize)
-	if err := json.NewDecoder(limited).Decode(v); err != nil {
+func readJSON(w http.ResponseWriter, r *http.Request, maxSize int64, v interface{}) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	return nil
@@ -648,8 +729,7 @@ func makeAdminCreateTokenHandler(tokens TokenStore, logger *slog.Logger) http.Ha
 
 		rawToken, info, err := tokens.CreateToken(req.Description, req.Repos, req.Permission)
 		if err != nil {
-			logger.Error("create token", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+			internalError(w, "create token", err)
 			return
 		}
 
@@ -667,8 +747,7 @@ func makeAdminListTokensHandler(tokens TokenStore, logger *slog.Logger) http.Han
 	return func(w http.ResponseWriter, r *http.Request) {
 		list, err := tokens.ListTokens()
 		if err != nil {
-			logger.Error("list tokens", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+			internalError(w, "list tokens", err)
 			return
 		}
 
@@ -712,7 +791,8 @@ func makeAdminDeleteTokenHandler(tokens TokenStore, logger *slog.Logger) http.Ha
 }
 
 // makeAdminGCHandler creates a handler for garbage collecting a repo's unreferenced blobs.
-func makeAdminGCHandler(repos RepoOpener, logger *slog.Logger) http.HandlerFunc {
+// The locker prevents concurrent writes from racing with the mark-sweep GC.
+func makeAdminGCHandler(repos RepoOpener, locker RepoLocker, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		repoName := r.PathValue("repo")
 		if repoName == "" {
@@ -726,9 +806,14 @@ func makeAdminGCHandler(repos RepoOpener, logger *slog.Logger) http.HandlerFunc 
 			return
 		}
 
+		// Acquire write lock to prevent concurrent pushes from creating the
+		// TOCTOU race where GC deletes a blob just referenced by a push.
+		locker.LockWrite(repoName)
+		defer locker.UnlockWrite(repoName)
+
 		result, err := GarbageCollect(r.Context(), meta, blobs, logger)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal_error", "message": err.Error()})
+			internalError(w, "garbage collect", err)
 			return
 		}
 

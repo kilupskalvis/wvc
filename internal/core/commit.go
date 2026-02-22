@@ -2,12 +2,8 @@ package core
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/kilupskalvis/wvc/internal/config"
@@ -134,7 +130,7 @@ func finalizeCommit(ctx context.Context, st *store.Store, client weaviate.Client
 	}
 
 	now := time.Now()
-	commitID := generateCommitID(message, now, parentID, uncommittedOps)
+	commitID := models.GenerateCommitID(message, now, parentID, uncommittedOps)
 
 	if err := captureSchemaSnapshot(ctx, st, client, commitID); err != nil {
 		return nil, fmt.Errorf("capture schema: %w", err)
@@ -148,68 +144,20 @@ func finalizeCommit(ctx context.Context, st *store.Store, client weaviate.Client
 		OperationCount: opCount,
 	}
 
-	if _, err := st.MarkOperationsCommitted(commitID); err != nil {
-		return nil, err
+	// Determine branch state before the atomic write
+	branchName, _ := st.GetCurrentBranch()
+	branchExists := false
+	if branchName != "" {
+		existing, _ := st.GetBranch(branchName)
+		branchExists = existing != nil
 	}
 
-	if err := st.CreateCommit(commit); err != nil {
-		return nil, err
-	}
-
-	if err := st.SetHEAD(commitID); err != nil {
-		return nil, err
-	}
-
-	if branch, _ := st.GetCurrentBranch(); branch != "" {
-		existing, _ := st.GetBranch(branch)
-		if existing != nil {
-			if err := st.UpdateBranch(branch, commitID); err != nil {
-				return nil, fmt.Errorf("update branch %s: %w", branch, err)
-			}
-		} else {
-			// Unborn branch — create it on first commit
-			if err := st.CreateBranch(branch, commitID); err != nil {
-				return nil, fmt.Errorf("create branch %s: %w", branch, err)
-			}
-		}
+	// Atomically: mark operations committed, create commit, set HEAD, update branch
+	if _, err := st.FinalizeCommit(commit, branchName, branchExists); err != nil {
+		return nil, fmt.Errorf("finalize commit: %w", err)
 	}
 
 	return commit, nil
-}
-
-// generateCommitID generates a content-addressable commit ID.
-// The ID includes a Merkle hash of operations so that two commits with
-// identical metadata but different operations produce different IDs.
-func generateCommitID(message string, timestamp time.Time, parentID string, operations []*models.Operation) string {
-	opsHash := computeOperationsHash(operations)
-	data := fmt.Sprintf("%s|%s|%s|%s", message, timestamp.Format(time.RFC3339Nano), parentID, opsHash)
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
-}
-
-// computeOperationsHash computes a Merkle hash over a set of operations.
-// Each operation is hashed individually, the hashes are sorted, and then
-// hashed together to produce a deterministic digest.
-func computeOperationsHash(operations []*models.Operation) string {
-	if len(operations) == 0 {
-		return ""
-	}
-
-	hashes := make([]string, len(operations))
-	for i, op := range operations {
-		opData := fmt.Sprintf("%s|%s|%s|%s|%s",
-			op.Type, op.ClassName, op.ObjectID,
-			string(op.ObjectData), op.VectorHash)
-		h := sha256.Sum256([]byte(opData))
-		hashes[i] = hex.EncodeToString(h[:])
-	}
-
-	// Sort for deterministic ordering
-	sort.Strings(hashes)
-
-	combined := strings.Join(hashes, "")
-	final := sha256.Sum256([]byte(combined))
-	return hex.EncodeToString(final[:])
 }
 
 // captureSchemaSnapshot fetches current schema and saves it with the commit
